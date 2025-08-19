@@ -1,0 +1,684 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: intelliflow-monitoring
+  labels:
+    app: logstash
+    component: config
+data:
+  logstash.yml: |
+    http.host: 0.0.0.0
+    http.port: 9600
+    
+    path.config: /usr/share/logstash/pipeline
+    path.data: /usr/share/logstash/data
+    path.logs: /usr/share/logstash/logs
+    
+    pipeline.workers: 4
+    pipeline.batch.size: 1000
+    pipeline.batch.delay: 50
+    
+    config.reload.automatic: true
+    config.reload.interval: 30s
+    
+    monitoring.enabled: true
+    monitoring.elasticsearch.hosts: ["https://elasticsearch:9200"]
+    monitoring.elasticsearch.username: logstash_system
+    monitoring.elasticsearch.password: ${LOGSTASH_PASSWORD}
+    monitoring.elasticsearch.ssl.verification_mode: none
+    
+    xpack.management.enabled: true
+    xpack.management.pipeline.id: ["main", "fraud_detection", "audit_logs"]
+    xpack.management.elasticsearch.hosts: ["https://elasticsearch:9200"]
+    xpack.management.elasticsearch.username: logstash_system
+    xpack.management.elasticsearch.password: ${LOGSTASH_PASSWORD}
+    xpack.management.elasticsearch.ssl.verification_mode: none
+  
+  pipelines.yml: |
+    - pipeline.id: main
+      path.config: "/usr/share/logstash/pipeline/main.conf"
+      pipeline.workers: 2
+      pipeline.batch.size: 500
+      
+    - pipeline.id: fraud_detection
+      path.config: "/usr/share/logstash/pipeline/fraud_detection.conf"
+      pipeline.workers: 1
+      pipeline.batch.size: 100
+      
+    - pipeline.id: audit_logs
+      path.config: "/usr/share/logstash/pipeline/audit_logs.conf"
+      pipeline.workers: 1
+      pipeline.batch.size: 200
+      
+    - pipeline.id: metrics
+      path.config: "/usr/share/logstash/pipeline/metrics.conf"
+      pipeline.workers: 1
+      pipeline.batch.size: 1000
+  
+  jvm.options: |
+    -Xms2g
+    -Xmx2g
+    
+    -XX:+UseG1GC
+    -XX:+UseG1OldGCMixedGCCount=16
+    -XX:+UseG1MixedGCLiveThresholdPercent=90
+    
+    -Djava.awt.headless=true
+    -Dfile.encoding=UTF-8
+    -Djruby.compile.invokedynamic=true
+    -Djruby.jit.threshold=0
+    -XX:+HeapDumpOnOutOfMemoryError
+    -Djava.security.egd=file:/dev/urandom
+    
+    -Dlog4j2.isThreadContextMapInheritable=true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-pipeline
+  namespace: intelliflow-monitoring
+  labels:
+    app: logstash
+    component: pipeline
+data:
+  main.conf: |
+    input {
+      beats {
+        port => 5044
+        host => "0.0.0.0"
+      }
+      
+      http {
+        port => 8080
+        host => "0.0.0.0"
+        codec => json
+        additional_codecs => {
+          "application/json" => "json"
+        }
+      }
+      
+      kafka {
+        bootstrap_servers => "kafka:9092"
+        topics => ["application-logs", "error-logs", "performance-logs"]
+        consumer_threads => 2
+        group_id => "logstash-main"
+        auto_offset_reset => "latest"
+        codec => json
+      }
+    }
+    
+    filter {
+      # Parse timestamp
+      if [fields][logtype] {
+        mutate {
+          add_field => { "logtype" => "%{[fields][logtype]}" }
+        }
+      }
+      
+      # Parse Kubernetes metadata
+      if [kubernetes] {
+        mutate {
+          add_field => {
+            "namespace" => "%{[kubernetes][namespace]}"
+            "pod" => "%{[kubernetes][pod][name]}"
+            "container" => "%{[kubernetes][container][name]}"
+            "node" => "%{[kubernetes][node][name]}"
+          }
+        }
+      }
+      
+      # Parse application logs
+      if [logtype] == "application" {
+        # Spring Boot logs
+        if [log] =~ /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/ {
+          grok {
+            match => { "log" => "%{TIMESTAMP_ISO8601:timestamp} \[%{DATA:thread}\] %{LOGLEVEL:level}\s+\[%{DATA:correlation_id}?\] %{DATA:logger} - %{GREEDYDATA:message}" }
+          }
+          
+          date {
+            match => [ "timestamp", "yyyy-MM-dd HH:mm:ss.SSS", "yyyy-MM-dd HH:mm:ss" ]
+            target => "@timestamp"
+          }
+        }
+        
+        # Extract service name from namespace/pod
+        if [namespace] =~ /intelliflow/ {
+          grok {
+            match => { "pod" => "^(?<service>[^-]+)-.*" }
+          }
+        }
+        
+        # Parse HTTP request logs
+        if [message] =~ /HTTP|REST|Request/ {
+          grok {
+            match => { "message" => ".*method=(?<method>\w+).*uri=(?<uri>[^\s]+).*status=(?<status_code>\d+).*time=(?<response_time>\d+)" }
+          }
+          
+          if [status_code] {
+            mutate {
+              convert => { "status_code" => "integer" }
+            }
+          }
+          
+          if [response_time] {
+            mutate {
+              convert => { "response_time" => "float" }
+            }
+          }
+        }
+        
+        # Parse fraud detection logs
+        if [service] == "fraud-detection" {
+          if [message] =~ /fraud_score|prediction|model/ {
+            grok {
+              match => { "message" => ".*transaction_id=(?<transaction_id>[^\s]+).*fraud_score=(?<fraud_score>[\d.]+)" }
+            }
+            
+            if [fraud_score] {
+              mutate {
+                convert => { "fraud_score" => "float" }
+              }
+            }
+          }
+        }
+        
+        # Parse error messages
+        if [level] =~ /ERROR|FATAL/ {
+          grok {
+            match => { "message" => "(?<error_type>[^:]+): (?<error_message>.*)" }
+          }
+        }
+        
+        # Extract correlation ID from MDC
+        if [message] =~ /\[.*\]/ {
+          grok {
+            match => { "message" => ".*\[(?<extracted_correlation_id>[^\]]+)\].*" }
+          }
+          
+          if [extracted_correlation_id] and ![correlation_id] {
+            mutate {
+              add_field => { "correlation_id" => "%{extracted_correlation_id}" }
+            }
+          }
+        }
+      }
+      
+      # Parse metrics logs
+      if [logtype] == "metrics" {
+        if [message] =~ /METRIC/ {
+          grok {
+            match => { "message" => "METRIC: (?<metric_name>[^=]+)=(?<metric_value>[\d.]+) (?<metric_tags>.*)" }
+          }
+          
+          if [metric_value] {
+            mutate {
+              convert => { "metric_value" => "float" }
+            }
+          }
+          
+          if [metric_tags] {
+            kv {
+              source => "metric_tags"
+              target => "tags"
+            }
+          }
+        }
+      }
+      
+      # Enrich with GeoIP for external requests
+      if [client_ip] and [client_ip] !~ /^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)/ {
+        geoip {
+          source => "client_ip"
+          target => "geoip"
+        }
+      }
+      
+      # Security enrichment
+      if [level] == "ERROR" or [status_code] >= 400 {
+        mutate {
+          add_tag => ["security_relevant"]
+        }
+      }
+      
+      if [message] =~ /(authentication|authorization|login|logout|permission|access denied)/i {
+        mutate {
+          add_tag => ["auth_event"]
+        }
+      }
+      
+      # Performance tagging
+      if [response_time] {
+        if [response_time] > 5000 {
+          mutate { add_tag => ["slow_request"] }
+        } else if [response_time] > 1000 {
+          mutate { add_tag => ["medium_request"] }
+        } else {
+          mutate { add_tag => ["fast_request"] }
+        }
+      }
+      
+      # Business context enrichment
+      if [transaction_id] {
+        # Add business context
+        mutate {
+          add_field => { "business_event" => "true" }
+        }
+        
+        # Look up transaction details (if needed)
+        # jdbc_streaming {
+        #   jdbc_driver_library => "/opt/logstash/lib/postgresql.jar"
+        #   jdbc_driver_class => "org.postgresql.Driver"
+        #   jdbc_connection_string => "jdbc:postgresql://postgres:5432/intelliflow"
+        #   jdbc_user => "logstash_user"
+        #   jdbc_password => "${POSTGRES_PASSWORD}"
+        #   statement => "SELECT amount, currency, user_id FROM transactions WHERE transaction_id = :transaction_id"
+        #   parameters => { "transaction_id" => "%{transaction_id}" }
+        #   target => "transaction_details"
+        # }
+      }
+      
+      # Clean up fields
+      mutate {
+        remove_field => ["log", "input_type", "beat", "offset", "source", "type"]
+        remove_tag => ["_grokparsefailure"]
+      }
+    }
+    
+    output {
+      # Main application logs
+      if [logtype] == "application" {
+        elasticsearch {
+          hosts => ["https://elasticsearch:9200"]
+          user => "logstash_writer"
+          password => "${LOGSTASH_PASSWORD}"
+          ssl => true
+          ssl_certificate_verification => false
+          index => "intelliflow-logs-%{+YYYY.MM.dd}"
+          template_name => "intelliflow-logs"
+          template_pattern => "intelliflow-logs-*"
+          manage_template => false
+        }
+      }
+      
+      # Security and audit logs
+      if "security_relevant" in [tags] or "auth_event" in [tags] {
+        elasticsearch {
+          hosts => ["https://elasticsearch:9200"]
+          user => "logstash_writer"
+          password => "${LOGSTASH_PASSWORD}"
+          ssl => true
+          ssl_certificate_verification => false
+          index => "intelliflow-security-%{+YYYY.MM.dd}"
+        }
+      }
+      
+      # Error logs
+      if [level] =~ /ERROR|FATAL/ {
+        elasticsearch {
+          hosts => ["https://elasticsearch:9200"]
+          user => "logstash_writer"
+          password => "${LOGSTASH_PASSWORD}"
+          ssl => true
+          ssl_certificate_verification => false
+          index => "intelliflow-errors-%{+YYYY.MM.dd}"
+        }
+        
+        # Send critical errors to alerting
+        if [level] == "FATAL" or "critical" in [tags] {
+          http {
+            url => "http://alertmanager:9093/api/v1/alerts"
+            http_method => "post"
+            content_type => "application/json"
+            format => "json"
+            mapping => {
+              "alerts" => [{
+                "labels" => {
+                  "alertname" => "CriticalLogError"
+                  "service" => "%{service}"
+                  "namespace" => "%{namespace}"
+                  "severity" => "critical"
+                }
+                "annotations" => {
+                  "summary" => "Critical error in %{service}"
+                  "description" => "%{message}"
+                }
+                "generatorURL" => "http://kibana:5601"
+              }]
+            }
+          }
+        }
+      }
+      
+      # Performance logs
+      if "slow_request" in [tags] {
+        elasticsearch {
+          hosts => ["https://elasticsearch:9200"]
+          user => "logstash_writer"
+          password => "${LOGSTASH_PASSWORD}"
+          ssl => true
+          ssl_certificate_verification => false
+          index => "intelliflow-performance-%{+YYYY.MM.dd}"
+        }
+      }
+      
+      # Debug output
+      if [debug] == "true" {
+        stdout { codec => rubydebug }
+      }
+    }
+  
+  fraud_detection.conf: |
+    input {
+      kafka {
+        bootstrap_servers => "kafka:9092"
+        topics => ["fraud-detection-logs", "ml-model-logs"]
+        consumer_threads => 1
+        group_id => "logstash-fraud"
+        auto_offset_reset => "latest"
+        codec => json
+      }
+    }
+    
+    filter {
+      # Parse fraud detection specific logs
+      if [service] == "fraud-detection" {
+        # Extract prediction details
+        if [message] =~ /prediction/ {
+          grok {
+            match => { 
+              "message" => ".*prediction.*transaction_id=(?<transaction_id>[^\s]+).*score=(?<fraud_score>[\d.]+).*model=(?<model_name>[^\s]+).*latency=(?<prediction_latency>[\d.]+)" 
+            }
+          }
+          
+          if [fraud_score] {
+            mutate {
+              convert => { "fraud_score" => "float" }
+            }
+          }
+          
+          if [prediction_latency] {
+            mutate {
+              convert => { "prediction_latency" => "float" }
+            }
+          }
+          
+          # Classify fraud risk
+          if [fraud_score] {
+            if [fraud_score] >= 0.8 {
+              mutate { add_field => { "fraud_risk" => "high" } }
+            } else if [fraud_score] >= 0.5 {
+              mutate { add_field => { "fraud_risk" => "medium" } }
+            } else {
+              mutate { add_field => { "fraud_risk" => "low" } }
+            }
+          }
+        }
+        
+        # Model performance metrics
+        if [message] =~ /model_performance/ {
+          grok {
+            match => { 
+              "message" => ".*model_performance.*model=(?<model_name>[^\s]+).*accuracy=(?<accuracy>[\d.]+).*precision=(?<precision>[\d.]+).*recall=(?<recall>[\d.]+)" 
+            }
+          }
+          
+          ruby {
+            code => "
+              ['accuracy', 'precision', 'recall'].each do |metric|
+                if event.get(metric)
+                  event.set(metric, event.get(metric).to_f)
+                end
+              end
+            "
+          }
+        }
+        
+        # Feature extraction logs
+        if [message] =~ /feature_extraction/ {
+          grok {
+            match => { 
+              "message" => ".*feature_extraction.*transaction_id=(?<transaction_id>[^\s]+).*features_count=(?<features_count>\d+).*extraction_time=(?<extraction_time>[\d.]+)" 
+            }
+          }
+          
+          if [features_count] {
+            mutate {
+              convert => { "features_count" => "integer" }
+            }
+          }
+          
+          if [extraction_time] {
+            mutate {
+              convert => { "extraction_time" => "float" }
+            }
+          }
+        }
+      }
+    }
+    
+    output {
+      elasticsearch {
+        hosts => ["https://elasticsearch:9200"]
+        user => "logstash_writer"
+        password => "${LOGSTASH_PASSWORD}"
+        ssl => true
+        ssl_certificate_verification => false
+        index => "intelliflow-fraud-detection-%{+YYYY.MM.dd}"
+      }
+      
+      # High-risk fraud alerts
+      if [fraud_risk] == "high" {
+        http {
+          url => "http://alertmanager:9093/api/v1/alerts"
+          http_method => "post"
+          content_type => "application/json"
+          format => "json"
+          mapping => {
+            "alerts" => [{
+              "labels" => {
+                "alertname" => "HighFraudRisk"
+                "transaction_id" => "%{transaction_id}"
+                "fraud_score" => "%{fraud_score}"
+                "severity" => "warning"
+              }
+              "annotations" => {
+                "summary" => "High fraud risk detected"
+                "description" => "Transaction %{transaction_id} has fraud score of %{fraud_score}"
+              }
+            }]
+          }
+        }
+      }
+    }
+  
+  audit_logs.conf: |
+    input {
+      kafka {
+        bootstrap_servers => "kafka:9092"
+        topics => ["audit-logs", "security-events"]
+        consumer_threads => 1
+        group_id => "logstash-audit"
+        auto_offset_reset => "latest"
+        codec => json
+      }
+    }
+    
+    filter {
+      # Parse audit events
+      if [event_type] {
+        # User authentication events
+        if [event_type] =~ /auth/ {
+          mutate {
+            add_tag => ["authentication"]
+          }
+          
+          # Failed login attempts
+          if [outcome] == "failure" {
+            mutate {
+              add_tag => ["failed_auth"]
+            }
+          }
+        }
+        
+        # Admin actions
+        if [event_type] =~ /(create|update|delete)/ and [actor][role] =~ /admin/ {
+          mutate {
+            add_tag => ["admin_action"]
+          }
+        }
+        
+        # Data access events
+        if [event_type] =~ /data_access/ {
+          mutate {
+            add_tag => ["data_access"]
+          }
+          
+          # Sensitive data access
+          if [resource][type] =~ /(user|transaction|payment)/ {
+            mutate {
+              add_tag => ["sensitive_data"]
+            }
+          }
+        }
+        
+        # Calculate risk score
+        ruby {
+          code => "
+            risk_score = 0
+            
+            # Base risk by event type
+            case event.get('event_type')
+            when /login_failure/
+              risk_score += 3
+            when /permission_denied/
+              risk_score += 5
+            when /data_export/
+              risk_score += 7
+            when /admin_escalation/
+              risk_score += 8
+            end
+            
+            # Time-based risk (out of hours)
+            hour = Time.now.hour
+            if hour < 6 || hour > 22
+              risk_score += 2
+            end
+            
+            # IP-based risk (external IP)
+            if event.get('[actor][ip_address]') && !event.get('[actor][ip_address]').match(/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)/)
+              risk_score += 3
+            end
+            
+            event.set('risk_score', risk_score)
+            
+            # Risk classification
+            if risk_score >= 10
+              event.set('risk_level', 'critical')
+            elsif risk_score >= 7
+              event.set('risk_level', 'high')
+            elsif risk_score >= 4
+              event.set('risk_level', 'medium')
+            else
+              event.set('risk_level', 'low')
+            end
+          "
+        }
+      }
+    }
+    
+    output {
+      elasticsearch {
+        hosts => ["https://elasticsearch:9200"]
+        user => "logstash_writer"
+        password => "${LOGSTASH_PASSWORD}"
+        ssl => true
+        ssl_certificate_verification => false
+        index => "intelliflow-audit-%{+YYYY.MM.dd}"
+      }
+      
+      # High-risk security events
+      if [risk_level] =~ /(critical|high)/ {
+        http {
+          url => "http://alertmanager:9093/api/v1/alerts"
+          http_method => "post"
+          content_type => "application/json"
+          format => "json"
+          mapping => {
+            "alerts" => [{
+              "labels" => {
+                "alertname" => "HighRiskSecurityEvent"
+                "event_type" => "%{event_type}"
+                "user_id" => "%{[actor][user_id]}"
+                "severity" => "%{risk_level}"
+              }
+              "annotations" => {
+                "summary" => "High-risk security event detected"
+                "description" => "User %{[actor][user_id]} performed %{event_type} with risk score %{risk_score}"
+              }
+            }]
+          }
+        }
+        
+        # Also send to SIEM/security team
+        email {
+          to => "security@intelliflow.com"
+          subject => "HIGH RISK: Security Event Detected"
+          body => "Risk Level: %{risk_level}\nEvent: %{event_type}\nUser: %{[actor][user_id]}\nTimestamp: %{@timestamp}\nRisk Score: %{risk_score}"
+          from => "alerts@intelliflow.com"
+        }
+      }
+    }
+  
+  metrics.conf: |
+    input {
+      kafka {
+        bootstrap_servers => "kafka:9092"
+        topics => ["metrics"]
+        consumer_threads => 1
+        group_id => "logstash-metrics"
+        auto_offset_reset => "latest"
+        codec => json
+      }
+    }
+    
+    filter {
+      # Process different metric types
+      if [metric_type] {
+        case [metric_type]
+          when "counter"
+            mutate { add_tag => ["counter_metric"] }
+          when "gauge"
+            mutate { add_tag => ["gauge_metric"] }
+          when "histogram"
+            mutate { add_tag => ["histogram_metric"] }
+          when "timer"
+            mutate { add_tag => ["timer_metric"] }
+        end
+      }
+      
+      # Extract dimensions
+      if [dimensions] {
+        ruby {
+          code => "
+            dimensions = event.get('dimensions')
+            if dimensions.is_a?(Hash)
+              dimensions.each do |key, value|
+                event.set('dim_' + key, value)
+              end
+            end
+          "
+        }
+      }
+    }
+    
+    output {
+      elasticsearch {
+        hosts => ["https://elasticsearch:9200"]
+        user => "logstash_writer"
+        password => "${LOGSTASH_PASSWORD}"
+        ssl => true
+        ssl_certificate_verification => false
+        index => "intelliflow-metrics-%{+YYYY.MM.dd}"
+      }
+    }

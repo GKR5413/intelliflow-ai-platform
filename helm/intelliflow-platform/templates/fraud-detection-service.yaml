@@ -1,0 +1,376 @@
+{{- if .Values.services.fraudDetectionService.enabled }}
+{{- $service := .Values.services.fraudDetectionService }}
+{{- $serviceName := $service.name }}
+{{- $component := "ml-service" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" $component "imageTag" $service.image.tag) | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $serviceName }}-config
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" "config" "imageTag" $service.image.tag) | nindent 4 }}
+data:
+  config.yaml: |
+    app:
+      name: {{ $serviceName }}
+      environment: {{ .Values.global.environment }}
+      log_level: {{ $service.config.pythonEnv.logLevel }}
+    
+    server:
+      host: "0.0.0.0"
+      port: 8000
+      workers: {{ $service.config.pythonEnv.workers }}
+      max_requests: {{ $service.config.pythonEnv.maxRequests }}
+      max_requests_jitter: {{ $service.config.pythonEnv.maxRequestsJitter }}
+    
+    model:
+      path: "/models"
+      caching_strategy: {{ $service.config.model.cachingStrategy | quote }}
+      batch_size: {{ $service.config.model.batchSize }}
+      timeout_ms: {{ $service.config.model.timeoutMs }}
+    
+    redis:
+      host: {{ .Release.Name }}-redis-master
+      port: 6379
+      password: ${REDIS_PASSWORD}
+      database: 1
+    
+    database:
+      url: postgresql://${DB_USERNAME}:${DB_PASSWORD}@{{ .Release.Name }}-postgresql:5432/intelliflow_fraud
+    
+    mlflow:
+      tracking_uri: http://{{ .Release.Name }}-mlflow:5000
+    
+    monitoring:
+      prometheus:
+        enabled: true
+        port: 8000
+        path: /metrics
+    
+    {{- if $service.config.gpu.enabled }}
+    gpu:
+      enabled: true
+      memory_fraction: {{ $service.config.gpu.memoryFraction }}
+    {{- end }}
+---
+{{- if $service.initContainer.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $serviceName }}-models
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" "storage" "imageTag" $service.image.tag) | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ include "intelliflow-platform.storageClass" . }}
+  resources:
+    requests:
+      storage: {{ $service.initContainer.storage.size }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" $component "imageTag" $service.image.tag) | nindent 4 }}
+spec:
+  replicas: {{ $service.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "intelliflow-platform.serviceSelectorLabels" (dict "serviceName" $serviceName "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" $component "imageTag" $service.image.tag) | nindent 8 }}
+      annotations:
+        {{- include "intelliflow-platform.serviceAnnotations" (dict "Values" .Values "servicePort" $service.service.port) | nindent 8 }}
+        {{- include "intelliflow-platform.istioAnnotations" . | nindent 8 }}
+        checksum/config: {{ include (print $.Template.BasePath "/fraud-detection-service.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "intelliflow-platform.serviceAccountNameForService" (dict "Values" .Values "serviceName" $serviceName) }}
+      {{- include "intelliflow-platform.podSecurityContext" . | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $service.initContainer.enabled }}
+      initContainers:
+      - name: model-downloader
+        image: {{ include "intelliflow-platform.image" (dict "Values" .Values "imageRepository" $service.initContainer.image.repository "imageTag" $service.initContainer.image.tag) }}
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            echo "Downloading latest fraud detection model..."
+            aws s3 cp s3://intelliflow-models/fraud-detection/latest/ /models/ --recursive
+            echo "Model download completed"
+        env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: mlflow-secrets
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mlflow-secrets
+              key: AWS_SECRET_ACCESS_KEY
+        - name: AWS_DEFAULT_REGION
+          value: "us-west-2"
+        volumeMounts:
+        - name: model-volume
+          mountPath: /models
+        securityContext:
+          runAsUser: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+      {{- end }}
+      containers:
+      - name: {{ $serviceName }}
+        image: {{ include "intelliflow-platform.image" (dict "Values" .Values "imageRepository" $service.image.repository "imageTag" $service.image.tag) }}
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ $service.service.targetPort }}
+          protocol: TCP
+        - name: grpc
+          containerPort: {{ $service.service.grpcPort }}
+          protocol: TCP
+        - name: monitor
+          containerPort: {{ $service.service.monitorPort }}
+          protocol: TCP
+        env:
+        - name: MODEL_PATH
+          value: "/models"
+        - name: REDIS_URL
+          value: "redis://{{ .Release.Name }}-redis-master:6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secrets
+              key: REDIS_PASSWORD
+        - name: DATABASE_URL
+          value: "postgresql://$(DB_USERNAME):$(DB_PASSWORD)@{{ .Release.Name }}-postgresql:5432/intelliflow_fraud"
+        - name: DB_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: database-secrets
+              key: DB_USERNAME
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-secrets
+              key: DB_PASSWORD
+        - name: MLFLOW_TRACKING_URI
+          value: "http://{{ .Release.Name }}-mlflow:5000"
+        - name: PYTHONPATH
+          value: "/app:/app/src"
+        - name: LOG_LEVEL
+          value: {{ $service.config.pythonEnv.logLevel }}
+        - name: WORKERS
+          value: {{ $service.config.pythonEnv.workers | quote }}
+        - name: MAX_REQUESTS
+          value: {{ $service.config.pythonEnv.maxRequests | quote }}
+        - name: MAX_REQUESTS_JITTER
+          value: {{ $service.config.pythonEnv.maxRequestsJitter | quote }}
+        {{- include "intelliflow-platform.commonEnvVars" (dict "config" $service.config "Values" .Values) | nindent 8 }}
+        volumeMounts:
+        {{- if $service.initContainer.enabled }}
+        - name: model-volume
+          mountPath: /models
+          readOnly: true
+        {{- end }}
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: logs-volume
+          mountPath: /app/logs
+        - name: tmp-volume
+          mountPath: /tmp
+        {{- include "intelliflow-platform.securityContext" . | nindent 8 }}
+        {{- include "intelliflow-platform.resources" $service | nindent 8 }}
+        livenessProbe:
+          {{- toYaml $service.healthCheck.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml $service.healthCheck.readinessProbe | nindent 10 }}
+        startupProbe:
+          httpGet:
+            path: /health
+            port: {{ $service.service.targetPort }}
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 20
+      - name: model-monitor
+        image: intelliflow/model-monitor:1.0.0
+        ports:
+        - name: monitor
+          containerPort: 8001
+        env:
+        - name: MODEL_SERVICE_URL
+          value: "http://localhost:8000"
+        - name: PROMETHEUS_URL
+          value: "http://{{ .Release.Name }}-prometheus-server:80"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        securityContext:
+          runAsUser: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+      volumes:
+      {{- if $service.initContainer.enabled }}
+      - name: model-volume
+        persistentVolumeClaim:
+          claimName: {{ $serviceName }}-models
+      {{- end }}
+      - name: config-volume
+        configMap:
+          name: {{ $serviceName }}-config
+      - name: logs-volume
+        emptyDir: {}
+      - name: tmp-volume
+        emptyDir: {}
+      {{- include "intelliflow-platform.nodeSelector" $service | nindent 6 }}
+      {{- include "intelliflow-platform.affinity" (dict "serviceName" $serviceName "affinity" $service.affinity) | nindent 6 }}
+      tolerations:
+      {{- if $service.resources.requests.nvidia.com/gpu }}
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      {{- end }}
+      {{- include "intelliflow-platform.tolerations" $service | nindent 6 }}
+      terminationGracePeriodSeconds: 120
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" $component "imageTag" $service.image.tag) | nindent 4 }}
+spec:
+  type: {{ $service.service.type }}
+  ports:
+  - name: http
+    port: {{ $service.service.port }}
+    targetPort: {{ $service.service.targetPort }}
+    protocol: TCP
+  - name: grpc
+    port: {{ $service.service.grpcPort }}
+    targetPort: {{ $service.service.grpcPort }}
+    protocol: TCP
+  - name: monitor
+    port: {{ $service.service.monitorPort }}
+    targetPort: {{ $service.service.monitorPort }}
+    protocol: TCP
+  selector:
+    {{- include "intelliflow-platform.serviceSelectorLabels" (dict "serviceName" $serviceName "Release" .Release) | nindent 4 }}
+{{- if $service.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $serviceName }}-hpa
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" "autoscaler" "imageTag" $service.image.tag) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $serviceName }}
+  minReplicas: {{ $service.autoscaling.minReplicas }}
+  maxReplicas: {{ $service.autoscaling.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ $service.autoscaling.targetCPUUtilizationPercentage }}
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: {{ $service.autoscaling.targetMemoryUtilizationPercentage }}
+  {{- if $service.resources.requests.nvidia.com/gpu }}
+  - type: Resource
+    resource:
+      name: nvidia.com/gpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  {{- end }}
+  {{- if $service.autoscaling.customMetrics }}
+  {{- range $service.autoscaling.customMetrics }}
+  - {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 120
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 900
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 120
+      selectPolicy: Min
+{{- end }}
+{{- if .Values.global.monitoring.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" "monitoring" "imageTag" $service.image.tag) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "intelliflow-platform.serviceSelectorLabels" (dict "serviceName" $serviceName "Release" .Release) | nindent 6 }}
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+  - port: monitor
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+{{- end }}
+{{- end }}

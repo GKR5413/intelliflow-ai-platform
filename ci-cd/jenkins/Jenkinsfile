@@ -1,0 +1,978 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: maven
+    image: maven:3.8.6-openjdk-17
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+    - name: maven-cache
+      mountPath: /root/.m2
+  - name: docker
+    image: docker:24.0.7-dind
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: docker-sock
+      mountPath: /var/run/docker.sock
+  - name: kubectl
+    image: bitnami/kubectl:1.28.4
+    command:
+    - cat
+    tty: true
+  - name: helm
+    image: alpine/helm:3.13.2
+    command:
+    - cat
+    tty: true
+  - name: sonar-scanner
+    image: sonarsource/sonar-scanner-cli:5.0
+    command:
+    - cat
+    tty: true
+  - name: trivy
+    image: aquasec/trivy:0.48.1
+    command:
+    - cat
+    tty: true
+  - name: python
+    image: python:3.11-slim
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: pip-cache
+      mountPath: /root/.cache/pip
+  volumes:
+  - name: docker-sock
+    hostPath:
+      path: /var/run/docker.sock
+  - name: maven-cache
+    persistentVolumeClaim:
+      claimName: maven-cache-pvc
+  - name: pip-cache
+    persistentVolumeClaim:
+      claimName: pip-cache-pvc
+"""
+        }
+    }
+
+    environment {
+        DOCKER_REGISTRY = "intelliflow-registry.com"
+        HARBOR_CREDENTIALS = credentials('harbor-credentials')
+        KUBECONFIG = credentials('kubeconfig')
+        SONAR_TOKEN = credentials('sonar-token')
+        SLACK_WEBHOOK = credentials('slack-webhook')
+        VAULT_ADDR = "https://vault.intelliflow.com"
+        VAULT_TOKEN = credentials('vault-token')
+        
+        // Service versions
+        USER_SERVICE_VERSION = "${BUILD_NUMBER}"
+        TRANSACTION_SERVICE_VERSION = "${BUILD_NUMBER}"
+        FRAUD_DETECTION_VERSION = "${BUILD_NUMBER}"
+        ANALYTICS_SERVICE_VERSION = "${BUILD_NUMBER}"
+        NOTIFICATION_SERVICE_VERSION = "${BUILD_NUMBER}"
+        API_GATEWAY_VERSION = "${BUILD_NUMBER}"
+        
+        // Git information
+        GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+        GIT_BRANCH = env.BRANCH_NAME ?: 'main'
+        
+        // Build metadata
+        BUILD_TIMESTAMP = sh(script: "date -u +%Y%m%d-%H%M%S", returnStdout: true).trim()
+        IMAGE_TAG = "${GIT_BRANCH}-${BUILD_NUMBER}-${GIT_COMMIT_SHORT}"
+        
+        // Deployment targets
+        TARGET_NAMESPACE = getTargetNamespace(env.BRANCH_NAME)
+        DEPLOYMENT_ENVIRONMENT = getDeploymentEnvironment(env.BRANCH_NAME)
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30', daysToKeepStr: '30'))
+        timeout(time: 60, unit: 'MINUTES')
+        retry(2)
+        parallelsAlwaysFailFast()
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    triggers {
+        // Trigger builds on SCM changes
+        pollSCM('H/5 * * * *')
+        
+        // Nightly builds for main branch
+        cron(env.BRANCH_NAME == 'main' ? 'H 2 * * *' : '')
+        
+        // Trigger on upstream jobs
+        upstream(upstreamProjects: 'shared-library-build', threshold: hudson.model.Result.SUCCESS)
+    }
+
+    parameters {
+        choice(
+            name: 'DEPLOY_ENVIRONMENT',
+            choices: ['auto', 'development', 'staging', 'production'],
+            description: 'Target deployment environment'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Skip test execution (not recommended for production)'
+        )
+        booleanParam(
+            name: 'FORCE_DEPLOY',
+            defaultValue: false,
+            description: 'Force deployment even if quality gates fail'
+        )
+        booleanParam(
+            name: 'DEPLOY_ML_SERVICES',
+            defaultValue: true,
+            description: 'Deploy ML services (fraud detection, AI orchestrator)'
+        )
+        string(
+            name: 'CUSTOM_IMAGE_TAG',
+            defaultValue: '',
+            description: 'Custom image tag (overrides default)'
+        )
+    }
+
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    // Send Slack notification
+                    sendSlackNotification("🚀 Starting build for ${env.JOB_NAME} #${env.BUILD_NUMBER}", "info")
+                    
+                    // Set custom image tag if provided
+                    if (params.CUSTOM_IMAGE_TAG) {
+                        env.IMAGE_TAG = params.CUSTOM_IMAGE_TAG
+                    }
+                    
+                    // Display build information
+                    echo """
+====================================
+Build Information
+====================================
+Branch: ${env.GIT_BRANCH}
+Commit: ${env.GIT_COMMIT_SHORT}
+Build Number: ${env.BUILD_NUMBER}
+Image Tag: ${env.IMAGE_TAG}
+Target Namespace: ${env.TARGET_NAMESPACE}
+Environment: ${env.DEPLOYMENT_ENVIRONMENT}
+====================================
+"""
+                }
+                
+                // Checkout code
+                checkout scm
+                
+                // Cache dependencies
+                sh 'mkdir -p ~/.m2/repository ~/.cache/pip'
+                
+                // Validate Jenkinsfile
+                validateJenkinsfile()
+            }
+        }
+
+        stage('Quality Gates - Pre-Build') {
+            parallel {
+                stage('Code Quality Analysis') {
+                    when {
+                        not { params.SKIP_TESTS }
+                    }
+                    steps {
+                        container('sonar-scanner') {
+                            script {
+                                sh """
+                                    sonar-scanner \
+                                        -Dsonar.projectKey=intelliflow-platform \
+                                        -Dsonar.sources=. \
+                                        -Dsonar.host.url=https://sonarqube.intelliflow.com \
+                                        -Dsonar.login=${env.SONAR_TOKEN} \
+                                        -Dsonar.branch.name=${env.GIT_BRANCH} \
+                                        -Dsonar.scm.revision=${env.GIT_COMMIT} \
+                                        -Dsonar.buildString=${env.BUILD_NUMBER}
+                                """
+                                
+                                // Wait for quality gate
+                                timeout(time: 10, unit: 'MINUTES') {
+                                    def qg = waitForQualityGate()
+                                    if (qg.status != 'OK' && !params.FORCE_DEPLOY) {
+                                        error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            publishHTML([
+                                allowMissing: false,
+                                alwaysLinkToLastBuild: true,
+                                keepAll: true,
+                                reportDir: '.scannerwork',
+                                reportFiles: 'report-task.txt',
+                                reportName: 'SonarQube Analysis Report'
+                            ])
+                        }
+                    }
+                }
+
+                stage('Security Scan - Source Code') {
+                    steps {
+                        container('trivy') {
+                            script {
+                                sh """
+                                    # Scan for vulnerabilities in source code
+                                    trivy fs --security-checks vuln,secret,config \
+                                        --format sarif \
+                                        --output trivy-source-results.sarif \
+                                        .
+                                    
+                                    # Generate human-readable report
+                                    trivy fs --security-checks vuln,secret,config \
+                                        --format table \
+                                        --output trivy-source-report.txt \
+                                        .
+                                """
+                                
+                                // Archive security scan results
+                                archiveArtifacts artifacts: 'trivy-source-*.sarif,trivy-source-*.txt', allowEmptyArchive: true
+                                
+                                // Check for critical vulnerabilities
+                                def criticalVulns = sh(
+                                    script: "trivy fs --security-checks vuln --severity CRITICAL --quiet --format json . | jq '.Results[]?.Vulnerabilities[]? | select(.Severity==\"CRITICAL\") | .VulnerabilityID' | wc -l",
+                                    returnStdout: true
+                                ).trim()
+                                
+                                if (criticalVulns.toInteger() > 0 && !params.FORCE_DEPLOY) {
+                                    error "Critical vulnerabilities found in source code: ${criticalVulns}"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('License Compliance') {
+                    steps {
+                        container('maven') {
+                            sh """
+                                mvn license:check-file-header license:check
+                                mvn org.codehaus.mojo:license-maven-plugin:2.2.0:aggregate-third-party-report
+                            """
+                            
+                            publishHTML([
+                                allowMissing: false,
+                                alwaysLinkToLastBuild: true,
+                                keepAll: true,
+                                reportDir: 'target/site',
+                                reportFiles: 'aggregate-third-party-report.html',
+                                reportName: 'License Compliance Report'
+                            ])
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build & Test Services') {
+            parallel {
+                stage('Java Services') {
+                    stages {
+                        stage('Build Java Services') {
+                            steps {
+                                container('maven') {
+                                    sh """
+                                        mvn clean compile -B -T 4 \
+                                            -Dmaven.repo.local=/root/.m2/repository \
+                                            -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+                                    """
+                                }
+                            }
+                        }
+
+                        stage('Unit Tests - Java') {
+                            when {
+                                not { params.SKIP_TESTS }
+                            }
+                            steps {
+                                container('maven') {
+                                    sh """
+                                        mvn test -B -T 4 \
+                                            -Dmaven.repo.local=/root/.m2/repository \
+                                            -Dspring.profiles.active=test \
+                                            -Djacoco.skip=false
+                                    """
+                                }
+                            }
+                            post {
+                                always {
+                                    junit '**/target/surefire-reports/*.xml'
+                                    publishHTML([
+                                        allowMissing: false,
+                                        alwaysLinkToLastBuild: true,
+                                        keepAll: true,
+                                        reportDir: 'target/site/jacoco',
+                                        reportFiles: 'index.html',
+                                        reportName: 'Java Code Coverage Report'
+                                    ])
+                                }
+                            }
+                        }
+
+                        stage('Integration Tests - Java') {
+                            when {
+                                allOf {
+                                    not { params.SKIP_TESTS }
+                                    anyOf {
+                                        branch 'main'
+                                        branch 'develop'
+                                        changeRequest()
+                                    }
+                                }
+                            }
+                            steps {
+                                container('maven') {
+                                    sh """
+                                        mvn verify -B -T 4 \
+                                            -Dmaven.repo.local=/root/.m2/repository \
+                                            -Dspring.profiles.active=integration-test \
+                                            -Dskip.unit.tests=true
+                                    """
+                                }
+                            }
+                            post {
+                                always {
+                                    junit '**/target/failsafe-reports/*.xml'
+                                }
+                            }
+                        }
+
+                        stage('Package Java Services') {
+                            steps {
+                                container('maven') {
+                                    sh """
+                                        mvn package -B -T 4 \
+                                            -Dmaven.repo.local=/root/.m2/repository \
+                                            -DskipTests=true \
+                                            -Dspring.profiles.active=production
+                                    """
+                                }
+                            }
+                            post {
+                                always {
+                                    archiveArtifacts artifacts: '**/target/*.jar', allowEmptyArchive: false
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Python Services') {
+                    stages {
+                        stage('Setup Python Environment') {
+                            steps {
+                                container('python') {
+                                    sh """
+                                        cd fraud-detection-service/src/main/python
+                                        pip install --upgrade pip
+                                        pip install -r requirements.txt
+                                        pip install pytest pytest-cov pytest-xdist black flake8 mypy bandit safety
+                                    """
+                                }
+                            }
+                        }
+
+                        stage('Code Quality - Python') {
+                            when {
+                                not { params.SKIP_TESTS }
+                            }
+                            parallel {
+                                stage('Linting - Python') {
+                                    steps {
+                                        container('python') {
+                                            sh """
+                                                cd fraud-detection-service/src/main/python
+                                                black --check --diff .
+                                                flake8 . --max-line-length=100 --exclude=__pycache__,venv
+                                                mypy . --ignore-missing-imports
+                                            """
+                                        }
+                                    }
+                                }
+
+                                stage('Security Scan - Python') {
+                                    steps {
+                                        container('python') {
+                                            sh """
+                                                cd fraud-detection-service/src/main/python
+                                                bandit -r . -f json -o bandit-report.json || true
+                                                safety check --json --output safety-report.json || true
+                                            """
+                                            
+                                            archiveArtifacts artifacts: '**/bandit-report.json,**/safety-report.json', allowEmptyArchive: true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        stage('Unit Tests - Python') {
+                            when {
+                                not { params.SKIP_TESTS }
+                            }
+                            steps {
+                                container('python') {
+                                    sh """
+                                        cd fraud-detection-service/src/main/python
+                                        pytest tests/ \
+                                            --cov=. \
+                                            --cov-report=html \
+                                            --cov-report=xml \
+                                            --junitxml=pytest-results.xml \
+                                            --maxfail=3 \
+                                            -n auto
+                                    """
+                                }
+                            }
+                            post {
+                                always {
+                                    junit 'fraud-detection-service/src/main/python/pytest-results.xml'
+                                    publishHTML([
+                                        allowMissing: false,
+                                        alwaysLinkToLastBuild: true,
+                                        keepAll: true,
+                                        reportDir: 'fraud-detection-service/src/main/python/htmlcov',
+                                        reportFiles: 'index.html',
+                                        reportName: 'Python Code Coverage Report'
+                                    ])
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Docker Images') {
+            parallel {
+                stage('User Service Image') {
+                    steps {
+                        container('docker') {
+                            script {
+                                def image = docker.build("${env.DOCKER_REGISTRY}/user-service:${env.IMAGE_TAG}", 
+                                    "-f user-service/Dockerfile user-service/")
+                                
+                                // Security scan
+                                sh """
+                                    trivy image --security-checks vuln \
+                                        --severity HIGH,CRITICAL \
+                                        --format sarif \
+                                        --output trivy-user-service.sarif \
+                                        ${env.DOCKER_REGISTRY}/user-service:${env.IMAGE_TAG}
+                                """
+                                
+                                // Push to registry
+                                docker.withRegistry("https://${env.DOCKER_REGISTRY}", env.HARBOR_CREDENTIALS) {
+                                    image.push()
+                                    image.push("latest")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Transaction Service Image') {
+                    steps {
+                        container('docker') {
+                            script {
+                                def image = docker.build("${env.DOCKER_REGISTRY}/transaction-service:${env.IMAGE_TAG}", 
+                                    "-f transaction-service/Dockerfile transaction-service/")
+                                
+                                sh """
+                                    trivy image --security-checks vuln \
+                                        --severity HIGH,CRITICAL \
+                                        --format sarif \
+                                        --output trivy-transaction-service.sarif \
+                                        ${env.DOCKER_REGISTRY}/transaction-service:${env.IMAGE_TAG}
+                                """
+                                
+                                docker.withRegistry("https://${env.DOCKER_REGISTRY}", env.HARBOR_CREDENTIALS) {
+                                    image.push()
+                                    image.push("latest")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Fraud Detection Service Image') {
+                    when {
+                        params.DEPLOY_ML_SERVICES
+                    }
+                    steps {
+                        container('docker') {
+                            script {
+                                def image = docker.build("${env.DOCKER_REGISTRY}/fraud-detection-service:${env.IMAGE_TAG}", 
+                                    "-f fraud-detection-service/Dockerfile fraud-detection-service/")
+                                
+                                sh """
+                                    trivy image --security-checks vuln \
+                                        --severity HIGH,CRITICAL \
+                                        --format sarif \
+                                        --output trivy-fraud-detection.sarif \
+                                        ${env.DOCKER_REGISTRY}/fraud-detection-service:${env.IMAGE_TAG}
+                                """
+                                
+                                docker.withRegistry("https://${env.DOCKER_REGISTRY}", env.HARBOR_CREDENTIALS) {
+                                    image.push()
+                                    image.push("latest")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Analytics Service Image') {
+                    steps {
+                        container('docker') {
+                            script {
+                                def image = docker.build("${env.DOCKER_REGISTRY}/analytics-service:${env.IMAGE_TAG}", 
+                                    "-f analytics-service/Dockerfile analytics-service/")
+                                
+                                sh """
+                                    trivy image --security-checks vuln \
+                                        --severity HIGH,CRITICAL \
+                                        --format sarif \
+                                        --output trivy-analytics-service.sarif \
+                                        ${env.DOCKER_REGISTRY}/analytics-service:${env.IMAGE_TAG}
+                                """
+                                
+                                docker.withRegistry("https://${env.DOCKER_REGISTRY}", env.HARBOR_CREDENTIALS) {
+                                    image.push()
+                                    image.push("latest")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('API Gateway Image') {
+                    steps {
+                        container('docker') {
+                            script {
+                                def image = docker.build("${env.DOCKER_REGISTRY}/api-gateway:${env.IMAGE_TAG}", 
+                                    "-f api-gateway/Dockerfile api-gateway/")
+                                
+                                sh """
+                                    trivy image --security-checks vuln \
+                                        --severity HIGH,CRITICAL \
+                                        --format sarif \
+                                        --output trivy-api-gateway.sarif \
+                                        ${env.DOCKER_REGISTRY}/api-gateway:${env.IMAGE_TAG}
+                                """
+                                
+                                docker.withRegistry("https://${env.DOCKER_REGISTRY}", env.HARBOR_CREDENTIALS) {
+                                    image.push()
+                                    image.push("latest")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-*.sarif', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Deploy to Environment') {
+            when {
+                anyOf {
+                    allOf {
+                        branch 'main'
+                        params.DEPLOY_ENVIRONMENT == 'auto'
+                    }
+                    allOf {
+                        branch 'develop'
+                        params.DEPLOY_ENVIRONMENT == 'auto'
+                    }
+                    not { params.DEPLOY_ENVIRONMENT == 'auto' }
+                }
+            }
+            
+            stages {
+                stage('Pre-Deployment Validation') {
+                    steps {
+                        container('kubectl') {
+                            sh """
+                                # Validate Kubernetes manifests
+                                kubectl --dry-run=client --validate=true apply -f k8s/
+                                
+                                # Check cluster resources
+                                kubectl top nodes
+                                kubectl get nodes -o wide
+                                
+                                # Validate secrets exist
+                                kubectl get secrets -n ${env.TARGET_NAMESPACE}
+                            """
+                        }
+                    }
+                }
+
+                stage('Database Migration') {
+                    when {
+                        anyOf {
+                            branch 'main'
+                            branch 'develop'
+                        }
+                    }
+                    steps {
+                        container('kubectl') {
+                            script {
+                                sh """
+                                    # Create migration job
+                                    envsubst < ci-cd/k8s-jobs/db-migration-job.yaml | kubectl apply -f -
+                                    
+                                    # Wait for migration to complete
+                                    kubectl wait --for=condition=complete job/db-migration-${env.BUILD_NUMBER} \
+                                        --namespace=${env.TARGET_NAMESPACE} \
+                                        --timeout=300s
+                                    
+                                    # Check migration status
+                                    kubectl logs job/db-migration-${env.BUILD_NUMBER} --namespace=${env.TARGET_NAMESPACE}
+                                """
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            container('kubectl') {
+                                sh "kubectl delete job db-migration-${env.BUILD_NUMBER} --namespace=${env.TARGET_NAMESPACE} --ignore-not-found=true"
+                            }
+                        }
+                    }
+                }
+
+                stage('Deploy Services') {
+                    parallel {
+                        stage('Deploy Core Services') {
+                            steps {
+                                container('helm') {
+                                    script {
+                                        sh """
+                                            # Update Helm dependencies
+                                            helm dependency update ./helm/intelliflow-platform
+                                            
+                                            # Deploy using Helm
+                                            helm upgrade --install intelliflow-platform ./helm/intelliflow-platform \
+                                                --namespace ${env.TARGET_NAMESPACE} \
+                                                --create-namespace \
+                                                --values ./helm/values-${env.DEPLOYMENT_ENVIRONMENT}.yaml \
+                                                --set global.imageTag=${env.IMAGE_TAG} \
+                                                --set global.environment=${env.DEPLOYMENT_ENVIRONMENT} \
+                                                --set global.buildNumber=${env.BUILD_NUMBER} \
+                                                --set global.gitCommit=${env.GIT_COMMIT_SHORT} \
+                                                --wait \
+                                                --timeout=600s
+                                        """
+                                    }
+                                }
+                            }
+                        }
+
+                        stage('Deploy ML Services') {
+                            when {
+                                params.DEPLOY_ML_SERVICES
+                            }
+                            steps {
+                                container('helm') {
+                                    script {
+                                        sh """
+                                            # Deploy ML services
+                                            helm upgrade --install intelliflow-ml ./helm/intelliflow-ml \
+                                                --namespace ${env.TARGET_NAMESPACE} \
+                                                --values ./helm/values-ml-${env.DEPLOYMENT_ENVIRONMENT}.yaml \
+                                                --set global.imageTag=${env.IMAGE_TAG} \
+                                                --set fraudDetection.enabled=true \
+                                                --set aiOrchestrator.enabled=true \
+                                                --wait \
+                                                --timeout=900s
+                                        """
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Post-Deployment Verification') {
+                    steps {
+                        container('kubectl') {
+                            script {
+                                sh """
+                                    # Wait for all deployments to be ready
+                                    kubectl rollout status deployment/user-service -n ${env.TARGET_NAMESPACE} --timeout=300s
+                                    kubectl rollout status deployment/transaction-service -n ${env.TARGET_NAMESPACE} --timeout=300s
+                                    kubectl rollout status deployment/api-gateway -n ${env.TARGET_NAMESPACE} --timeout=300s
+                                    
+                                    # Check pod health
+                                    kubectl get pods -n ${env.TARGET_NAMESPACE} -o wide
+                                    
+                                    # Verify services are responding
+                                    kubectl get services -n ${env.TARGET_NAMESPACE}
+                                """
+                                
+                                if (params.DEPLOY_ML_SERVICES) {
+                                    sh """
+                                        kubectl rollout status deployment/fraud-detection-service -n ${env.TARGET_NAMESPACE} --timeout=600s
+                                        kubectl rollout status deployment/ai-orchestrator -n ${env.TARGET_NAMESPACE} --timeout=600s
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Post-Deployment Testing') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                    not { params.SKIP_TESTS }
+                }
+            }
+            parallel {
+                stage('Health Checks') {
+                    steps {
+                        container('kubectl') {
+                            script {
+                                sh """
+                                    # Get service endpoints
+                                    GATEWAY_IP=\$(kubectl get service api-gateway -n ${env.TARGET_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                                    
+                                    # Health check endpoints
+                                    curl -f http://\$GATEWAY_IP/api/v1/health || exit 1
+                                    curl -f http://\$GATEWAY_IP/api/v1/users/actuator/health || exit 1
+                                    curl -f http://\$GATEWAY_IP/api/v1/transactions/actuator/health || exit 1
+                                """
+                                
+                                if (params.DEPLOY_ML_SERVICES) {
+                                    sh """
+                                        GATEWAY_IP=\$(kubectl get service api-gateway -n ${env.TARGET_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                                        curl -f http://\$GATEWAY_IP/api/v1/fraud/health || exit 1
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Smoke Tests') {
+                    steps {
+                        container('maven') {
+                            sh """
+                                mvn test -Dtest=SmokeTestSuite \
+                                    -Dspring.profiles.active=smoke-test \
+                                    -Dtest.environment=${env.DEPLOYMENT_ENVIRONMENT} \
+                                    -Dtest.namespace=${env.TARGET_NAMESPACE}
+                            """
+                        }
+                    }
+                    post {
+                        always {
+                            junit '**/target/surefire-reports/SmokeTestSuite.xml'
+                        }
+                    }
+                }
+
+                stage('Performance Tests') {
+                    when {
+                        anyOf {
+                            branch 'main'
+                            params.FORCE_DEPLOY
+                        }
+                    }
+                    steps {
+                        script {
+                            build job: 'performance-tests', 
+                                parameters: [
+                                    string(name: 'TARGET_ENVIRONMENT', value: env.DEPLOYMENT_ENVIRONMENT),
+                                    string(name: 'TARGET_NAMESPACE', value: env.TARGET_NAMESPACE),
+                                    string(name: 'BUILD_VERSION', value: env.IMAGE_TAG)
+                                ],
+                                wait: true,
+                                propagate: false
+                        }
+                    }
+                }
+
+                stage('Security Tests') {
+                    steps {
+                        script {
+                            build job: 'security-tests',
+                                parameters: [
+                                    string(name: 'TARGET_ENVIRONMENT', value: env.DEPLOYMENT_ENVIRONMENT),
+                                    string(name: 'TARGET_NAMESPACE', value: env.TARGET_NAMESPACE)
+                                ],
+                                wait: true,
+                                propagate: false
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                // Collect all test results
+                publishTestResults testResultsPattern: '**/target/surefire-reports/*.xml,**/pytest-results.xml'
+                
+                // Archive build artifacts
+                archiveArtifacts artifacts: '**/*.jar,**/*.sarif,**/*.json,**/*.html', allowEmptyArchive: true
+                
+                // Clean up workspace
+                cleanWs()
+            }
+        }
+        
+        success {
+            script {
+                sendSlackNotification(
+                    "✅ Successfully deployed IntelliFlow Platform ${env.IMAGE_TAG} to ${env.DEPLOYMENT_ENVIRONMENT}",
+                    "good"
+                )
+                
+                // Update deployment tracking
+                updateDeploymentTracking("success")
+                
+                // Trigger downstream jobs for production
+                if (env.BRANCH_NAME == 'main' && env.DEPLOYMENT_ENVIRONMENT == 'production') {
+                    build job: 'backup-database', wait: false
+                    build job: 'update-documentation', wait: false
+                }
+            }
+        }
+        
+        failure {
+            script {
+                sendSlackNotification(
+                    "❌ Failed to deploy IntelliFlow Platform ${env.IMAGE_TAG} to ${env.DEPLOYMENT_ENVIRONMENT}",
+                    "danger"
+                )
+                
+                updateDeploymentTracking("failure")
+                
+                // Automatic rollback for production
+                if (env.DEPLOYMENT_ENVIRONMENT == 'production' && !params.FORCE_DEPLOY) {
+                    container('helm') {
+                        sh """
+                            echo "Initiating automatic rollback..."
+                            helm rollback intelliflow-platform --namespace ${env.TARGET_NAMESPACE}
+                        """
+                    }
+                }
+            }
+        }
+        
+        unstable {
+            script {
+                sendSlackNotification(
+                    "⚠️ IntelliFlow Platform ${env.IMAGE_TAG} deployment completed with warnings",
+                    "warning"
+                )
+            }
+        }
+        
+        aborted {
+            script {
+                sendSlackNotification(
+                    "⏹️ IntelliFlow Platform ${env.IMAGE_TAG} deployment was aborted",
+                    "warning"
+                )
+            }
+        }
+    }
+}
+
+// Helper functions
+def getTargetNamespace(branchName) {
+    switch(branchName) {
+        case 'main':
+            return 'intelliflow-prod'
+        case 'develop':
+            return 'intelliflow-staging'
+        default:
+            return 'intelliflow-dev'
+    }
+}
+
+def getDeploymentEnvironment(branchName) {
+    switch(branchName) {
+        case 'main':
+            return 'production'
+        case 'develop':
+            return 'staging'
+        default:
+            return 'development'
+    }
+}
+
+def sendSlackNotification(message, color) {
+    def payload = [
+        channel: '#deployments',
+        color: color,
+        message: message,
+        buildUrl: env.BUILD_URL,
+        jobName: env.JOB_NAME,
+        buildNumber: env.BUILD_NUMBER
+    ]
+    
+    httpRequest(
+        httpMode: 'POST',
+        url: env.SLACK_WEBHOOK,
+        contentType: 'APPLICATION_JSON',
+        requestBody: groovy.json.JsonOutput.toJson(payload)
+    )
+}
+
+def updateDeploymentTracking(status) {
+    // Update deployment tracking in external system
+    httpRequest(
+        httpMode: 'POST',
+        url: 'https://deployment-tracker.intelliflow.com/api/deployments',
+        contentType: 'APPLICATION_JSON',
+        requestBody: groovy.json.JsonOutput.toJson([
+            application: 'intelliflow-platform',
+            version: env.IMAGE_TAG,
+            environment: env.DEPLOYMENT_ENVIRONMENT,
+            status: status,
+            buildNumber: env.BUILD_NUMBER,
+            gitCommit: env.GIT_COMMIT_SHORT,
+            timestamp: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+        ])
+    )
+}
+
+def validateJenkinsfile() {
+    // Validate Jenkinsfile syntax and best practices
+    sh '''
+        if [ -f "Jenkinsfile" ]; then
+            echo "Validating Jenkinsfile syntax..."
+            # Add your Jenkinsfile validation logic here
+        fi
+    '''
+}

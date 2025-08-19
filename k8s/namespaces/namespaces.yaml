@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intelliflow-prod
+  labels:
+    name: intelliflow-prod
+    environment: production
+    version: v1.0.0
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intelliflow-staging
+  labels:
+    name: intelliflow-staging
+    environment: staging
+    version: v1.0.0
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intelliflow-dev
+  labels:
+    name: intelliflow-dev
+    environment: development
+    version: v1.0.0
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intelliflow-monitoring
+  labels:
+    name: intelliflow-monitoring
+    environment: shared
+    purpose: monitoring
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intelliflow-security
+  labels:
+    name: intelliflow-security
+    environment: shared
+    purpose: security

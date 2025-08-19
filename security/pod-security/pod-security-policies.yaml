@@ -1,0 +1,576 @@
+# Pod Security Standards for IntelliFlow Platform
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intelliflow-prod
+  labels:
+    name: intelliflow-prod
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intelliflow-staging
+  labels:
+    name: intelliflow-staging
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: intelliflow-dev
+  labels:
+    name: intelliflow-dev
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Security Context Constraints (for OpenShift compatibility)
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: intelliflow-scc
+  labels:
+    component: pod-security
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegedContainer: false
+allowedCapabilities: []
+allowedFlexVolumes: []
+defaultAddCapabilities: []
+fsGroup:
+  type: MustRunAs
+  ranges:
+  - min: 1000
+    max: 65534
+readOnlyRootFilesystem: true
+requiredDropCapabilities:
+- ALL
+runAsUser:
+  type: MustRunAsNonRoot
+  uid: 1000
+seLinuxContext:
+  type: MustRunAs
+supplementalGroups:
+  type: MustRunAs
+  ranges:
+  - min: 1000
+    max: 65534
+volumes:
+- configMap
+- downwardAPI
+- emptyDir
+- persistentVolumeClaim
+- projected
+- secret
+- serviceAccountToken
+users:
+- system:serviceaccount:intelliflow-prod:user-service
+- system:serviceaccount:intelliflow-prod:transaction-service
+- system:serviceaccount:intelliflow-prod:fraud-detection-service
+- system:serviceaccount:intelliflow-prod:analytics-service
+- system:serviceaccount:intelliflow-prod:api-gateway
+- system:serviceaccount:intelliflow-prod:ai-orchestrator
+---
+# Gatekeeper Constraint Templates
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: requiredlabels
+  labels:
+    component: pod-security
+spec:
+  crd:
+    spec:
+      names:
+        kind: RequiredLabels
+      validation:
+        type: object
+        properties:
+          labels:
+            type: array
+            items:
+              type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package requiredlabels
+        
+        violation[{"msg": msg}] {
+          required := input.parameters.labels
+          provided := input.review.object.metadata.labels
+          missing := required[_]
+          not provided[missing]
+          msg := sprintf("Missing required label: %v", [missing])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: RequiredLabels
+metadata:
+  name: must-have-app-label
+  labels:
+    component: pod-security
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    namespaces: ["intelliflow-prod", "intelliflow-staging"]
+  parameters:
+    labels: ["app", "version", "component"]
+---
+# Security policies using Gatekeeper
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: containersecuritypolicy
+  labels:
+    component: pod-security
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerSecurityPolicy
+      validation:
+        type: object
+        properties:
+          allowPrivileged:
+            type: boolean
+          allowPrivilegeEscalation:
+            type: boolean
+          requiredDropCapabilities:
+            type: array
+            items:
+              type: string
+          allowedVolumeTypes:
+            type: array
+            items:
+              type: string
+          runAsNonRoot:
+            type: boolean
+          readOnlyRootFilesystem:
+            type: boolean
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package containersecuritypolicy
+        
+        violation[{"msg": msg}] {
+          input.parameters.allowPrivileged == false
+          input.review.object.spec.template.spec.containers[_].securityContext.privileged == true
+          msg := "Privileged containers are not allowed"
+        }
+        
+        violation[{"msg": msg}] {
+          input.parameters.allowPrivilegeEscalation == false
+          input.review.object.spec.template.spec.containers[_].securityContext.allowPrivilegeEscalation == true
+          msg := "Privilege escalation is not allowed"
+        }
+        
+        violation[{"msg": msg}] {
+          input.parameters.runAsNonRoot == true
+          input.review.object.spec.template.spec.containers[_].securityContext.runAsUser == 0
+          msg := "Containers must not run as root"
+        }
+        
+        violation[{"msg": msg}] {
+          input.parameters.readOnlyRootFilesystem == true
+          input.review.object.spec.template.spec.containers[_].securityContext.readOnlyRootFilesystem != true
+          msg := "Root filesystem must be read-only"
+        }
+        
+        violation[{"msg": msg}] {
+          required_drops := input.parameters.requiredDropCapabilities
+          container := input.review.object.spec.template.spec.containers[_]
+          dropped := container.securityContext.capabilities.drop
+          required_drops[_] != dropped[_]
+          msg := sprintf("Must drop all capabilities: %v", [required_drops])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerSecurityPolicy
+metadata:
+  name: container-security-policy
+  labels:
+    component: pod-security
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["intelliflow-prod", "intelliflow-staging"]
+  parameters:
+    allowPrivileged: false
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    readOnlyRootFilesystem: true
+    requiredDropCapabilities: ["ALL"]
+    allowedVolumeTypes:
+      - "configMap"
+      - "downwardAPI"
+      - "emptyDir"
+      - "persistentVolumeClaim"
+      - "projected"
+      - "secret"
+      - "serviceAccountToken"
+---
+# Image security policy
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: allowedregistries
+  labels:
+    component: pod-security
+spec:
+  crd:
+    spec:
+      names:
+        kind: AllowedRegistries
+      validation:
+        type: object
+        properties:
+          registries:
+            type: array
+            items:
+              type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package allowedregistries
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.template.spec.containers[_]
+          image := container.image
+          allowed := input.parameters.registries
+          not startswith_any(image, allowed)
+          msg := sprintf("Image '%v' comes from an untrusted registry", [image])
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.template.spec.initContainers[_]
+          image := container.image
+          allowed := input.parameters.registries
+          not startswith_any(image, allowed)
+          msg := sprintf("Init container image '%v' comes from an untrusted registry", [image])
+        }
+        
+        startswith_any(str, patterns) {
+          startswith(str, patterns[_])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: AllowedRegistries
+metadata:
+  name: allowed-registries
+  labels:
+    component: pod-security
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["intelliflow-prod", "intelliflow-staging"]
+  parameters:
+    registries:
+      - "intelliflow-registry.com/"
+      - "gcr.io/intelliflow/"
+      - "docker.io/library/"
+      - "quay.io/"
+      - "registry.k8s.io/"
+      - "ghcr.io/intelliflow/"
+---
+# Resource limits policy
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: containerresourcelimits
+  labels:
+    component: pod-security
+spec:
+  crd:
+    spec:
+      names:
+        kind: ContainerResourceLimits
+      validation:
+        type: object
+        properties:
+          maxCpu:
+            type: string
+          maxMemory:
+            type: string
+          minCpu:
+            type: string
+          minMemory:
+            type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package containerresourcelimits
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.template.spec.containers[_]
+          not container.resources.limits.cpu
+          msg := "CPU limits must be specified"
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.template.spec.containers[_]
+          not container.resources.limits.memory
+          msg := "Memory limits must be specified"
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.template.spec.containers[_]
+          not container.resources.requests.cpu
+          msg := "CPU requests must be specified"
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.template.spec.containers[_]
+          not container.resources.requests.memory
+          msg := "Memory requests must be specified"
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ContainerResourceLimits
+metadata:
+  name: container-resource-limits
+  labels:
+    component: pod-security
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet"]
+    namespaces: ["intelliflow-prod", "intelliflow-staging"]
+  parameters:
+    maxCpu: "4000m"
+    maxMemory: "8Gi"
+    minCpu: "100m"
+    minMemory: "128Mi"
+---
+# Network policy requirements
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: requirenetworkpolicy
+  labels:
+    component: pod-security
+spec:
+  crd:
+    spec:
+      names:
+        kind: RequireNetworkPolicy
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package requirenetworkpolicy
+        
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Deployment"
+          input.review.object.metadata.namespace != "kube-system"
+          input.review.object.metadata.namespace != "kube-public"
+          not has_network_policy
+          msg := "Deployment must have a corresponding NetworkPolicy"
+        }
+        
+        has_network_policy {
+          # This would need to be implemented with external data
+          # or as part of a validation webhook
+          true
+        }
+---
+# Pod Security Context enforcement
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: podsecuritycontext
+  labels:
+    component: pod-security
+spec:
+  crd:
+    spec:
+      names:
+        kind: PodSecurityContext
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package podsecuritycontext
+        
+        violation[{"msg": msg}] {
+          not input.review.object.spec.template.spec.securityContext.runAsNonRoot
+          msg := "Pod securityContext must set runAsNonRoot to true"
+        }
+        
+        violation[{"msg": msg}] {
+          input.review.object.spec.template.spec.securityContext.runAsUser == 0
+          msg := "Pod securityContext must not run as root (UID 0)"
+        }
+        
+        violation[{"msg": msg}] {
+          not input.review.object.spec.template.spec.securityContext.fsGroup
+          msg := "Pod securityContext must set fsGroup"
+        }
+        
+        violation[{"msg": msg}] {
+          not input.review.object.spec.template.spec.securityContext.seccompProfile
+          msg := "Pod securityContext must set seccompProfile"
+        }
+        
+        violation[{"msg": msg}] {
+          input.review.object.spec.template.spec.securityContext.seccompProfile.type != "RuntimeDefault"
+          msg := "Pod securityContext seccompProfile must be RuntimeDefault"
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: PodSecurityContext
+metadata:
+  name: pod-security-context
+  labels:
+    component: pod-security
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    namespaces: ["intelliflow-prod", "intelliflow-staging"]
+---
+# Service Account security
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: serviceaccountrequirement
+  labels:
+    component: pod-security
+spec:
+  crd:
+    spec:
+      names:
+        kind: ServiceAccountRequirement
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package serviceaccountrequirement
+        
+        violation[{"msg": msg}] {
+          input.review.object.spec.template.spec.serviceAccountName == "default"
+          msg := "Pods must not use the default service account"
+        }
+        
+        violation[{"msg": msg}] {
+          not input.review.object.spec.template.spec.serviceAccountName
+          msg := "Pods must specify a service account"
+        }
+        
+        violation[{"msg": msg}] {
+          input.review.object.spec.template.spec.automountServiceAccountToken == true
+          input.review.object.spec.template.spec.serviceAccountName == "default"
+          msg := "Default service account token must not be auto-mounted"
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: ServiceAccountRequirement
+metadata:
+  name: service-account-requirement
+  labels:
+    component: pod-security
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["intelliflow-prod", "intelliflow-staging"]
+---
+# Falco security monitoring rules
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-rules
+  namespace: intelliflow-security
+  labels:
+    app: falco
+    component: security-monitoring
+data:
+  intelliflow_rules.yaml: |
+    - rule: Fraud Detection Suspicious Activity
+      desc: Detect suspicious activity in fraud detection service
+      condition: >
+        k8s_audit and
+        ka.target.pod startswith "fraud-detection" and
+        ka.verb in (create, update, delete) and
+        ka.target.resource contains "secret"
+      output: >
+        Suspicious activity in fraud detection service
+        (user=%ka.user.name verb=%ka.verb 
+         resource=%ka.target.resource pod=%ka.target.pod)
+      priority: WARNING
+      tags: [fraud_detection, security]
+    
+    - rule: High Privilege Container in Production
+      desc: Detect containers running with high privileges in production
+      condition: >
+        container and
+        k8s.ns.name startswith "intelliflow-prod" and
+        (container.privileged=true or
+         proc.name in (mount, umount, su, sudo, ssh))
+      output: >
+        High privilege operation in production
+        (user=%user.name command=%proc.cmdline pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [privilege_escalation, production]
+    
+    - rule: Unauthorized Network Connection
+      desc: Detect unauthorized outbound network connections
+      condition: >
+        outbound and
+        k8s.ns.name startswith "intelliflow" and
+        not fd.server.ip in (postgres_ips, redis_ips, kafka_ips) and
+        not fd.server.port in (443, 53, 123) and
+        not proc.name in (curl, wget, java, python)
+      output: >
+        Unauthorized network connection
+        (pod=%k8s.pod.name dest=%fd.server.ip:%fd.server.port command=%proc.cmdline)
+      priority: WARNING
+      tags: [network, unauthorized]
+    
+    - rule: Secret Access Outside Service Hours
+      desc: Detect secret access outside normal business hours
+      condition: >
+        k8s_audit and
+        ka.target.resource="secrets" and
+        ka.verb in (get, list) and
+        (ka.request_timestamp.hour < 6 or ka.request_timestamp.hour > 22)
+      output: >
+        Secret access outside business hours
+        (user=%ka.user.name secret=%ka.target.name time=%ka.request_timestamp)
+      priority: WARNING
+      tags: [secrets, after_hours]
+    
+    - rule: ML Model File Access
+      desc: Monitor access to ML model files
+      condition: >
+        open_read and
+        fd.name contains "/models/" and
+        k8s.ns.name startswith "intelliflow" and
+        not proc.name in (fraud-detection-service, ai-orchestrator)
+      output: >
+        Unauthorized ML model file access
+        (user=%user.name file=%fd.name pod=%k8s.pod.name command=%proc.cmdline)
+      priority: WARNING
+      tags: [ml_models, unauthorized_access]

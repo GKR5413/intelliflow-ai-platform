@@ -1,0 +1,369 @@
+# IntelliFlow User Service - Production Environment Configuration
+
+spring:
+  profiles:
+    active: production
+    include: common
+
+  # Database Configuration
+  datasource:
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME:user_db}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 50
+      minimum-idle: 10
+      idle-timeout: 600000
+      connection-timeout: 30000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
+      
+  # JPA Configuration
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+        generate_statistics: false
+        
+  # Redis Configuration
+  redis:
+    host: ${REDIS_HOST}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD}
+    timeout: 10000ms
+    ssl: true
+    lettuce:
+      pool:
+        max-active: 50
+        max-wait: 10000ms
+        max-idle: 20
+        min-idle: 5
+      cluster:
+        refresh:
+          adaptive: true
+          period: 30s
+        
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 10
+      batch-size: 32768
+      buffer-memory: 67108864
+      properties:
+        linger.ms: 10
+        compression.type: snappy
+        max.in.flight.requests.per.connection: 1
+        enable.idempotence: true
+    consumer:
+      group-id: user-service-prod
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 100
+      fetch-min-size: 1024
+      fetch-max-wait: 5000
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: com.intelliflow.shared.dto
+        session.timeout.ms: 30000
+        heartbeat.interval.ms: 10000
+
+# Server Configuration
+server:
+  port: 8081
+  servlet:
+    context-path: /api/v1
+  tomcat:
+    max-threads: 200
+    min-spare-threads: 25
+    accept-count: 100
+    max-connections: 8192
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/html,text/xml,text/plain
+    min-response-size: 1024
+  http2:
+    enabled: true
+
+# Management/Actuator Configuration
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: never
+      show-components: never
+      probes:
+        enabled: true
+    metrics:
+      enabled: true
+    prometheus:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+        step: 30s
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+      percentiles:
+        http.server.requests: 0.5,0.9,0.95,0.99
+      sla:
+        http.server.requests: 10ms,50ms,100ms,200ms,500ms,1s,2s
+  security:
+    enabled: true
+
+# Service Discovery
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL}
+    register-with-eureka: true
+    fetch-registry: true
+    registry-fetch-interval-seconds: 30
+    eureka-server-connect-timeout-seconds: 10
+    eureka-server-read-timeout-seconds: 10
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 30
+    lease-expiration-duration-in-seconds: 90
+    instance-id: ${spring.application.name}:${spring.cloud.client.hostname}:${server.port}
+
+# JWT Configuration
+jwt:
+  secret: ${JWT_SECRET}
+  expiration: ${JWT_EXPIRATION:86400000}
+  refresh-expiration: ${JWT_REFRESH_EXPIRATION:604800000}
+  issuer: "intelliflow-platform"
+
+# CORS Configuration
+cors:
+  allowed-origins: ${CORS_ALLOWED_ORIGINS:https://app.intelliflow.com,https://admin.intelliflow.com}
+  allowed-methods: GET,POST,PUT,DELETE,OPTIONS,HEAD
+  allowed-headers: "Authorization,Content-Type,X-Requested-With,Accept,X-Total-Count"
+  exposed-headers: "Authorization,Content-Type,X-Total-Count"
+  allow-credentials: true
+  max-age: 3600
+
+# Logging Configuration
+logging:
+  level:
+    com.intelliflow: INFO
+    org.springframework.security: WARN
+    org.springframework.web: WARN
+    org.hibernate: WARN
+    org.apache.kafka: WARN
+    root: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-},%X{spanId:-}] %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-},%X{spanId:-}] %logger{36} - %msg%n"
+  file:
+    name: /app/logs/user-service.log
+    max-size: 1GB
+    max-history: 90
+    total-size-cap: 20GB
+  logback:
+    rollingpolicy:
+      max-file-size: 1GB
+      max-history: 90
+
+# Custom Application Configuration
+app:
+  name: "IntelliFlow User Service"
+  version: "1.0.0"
+  environment: "production"
+  
+  # Rate Limiting
+  rate-limit:
+    enabled: true
+    requests-per-minute: 300
+    burst-capacity: 50
+    
+  # Email Configuration
+  email:
+    enabled: true
+    smtp:
+      host: ${MAIL_HOST}
+      port: ${MAIL_PORT:587}
+      username: ${MAIL_USERNAME}
+      password: ${MAIL_PASSWORD}
+      auth: true
+      starttls: true
+      connection-timeout: 10000
+      read-timeout: 10000
+    from: ${NOTIFICATION_EMAIL_FROM:noreply@intelliflow.com}
+    
+  # Password Policy
+  password-policy:
+    min-length: 12
+    require-uppercase: true
+    require-lowercase: true
+    require-numbers: true
+    require-special-chars: true
+    max-age-days: 90
+    history-count: 12
+    
+  # Session Configuration
+  session:
+    timeout-minutes: 15
+    max-concurrent-sessions: 2
+    
+  # Production security features
+  security:
+    csrf-enabled: true
+    session-fixation-protection: true
+    concurrent-session-control: true
+    
+  # Mock services - disabled in production
+  mock:
+    enabled: false
+
+# Circuit Breaker Configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      notification-service:
+        register-health-indicator: true
+        failure-rate-threshold: 50
+        minimum-number-of-calls: 20
+        automatic-transition-from-open-to-half-open-enabled: true
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 10
+        sliding-window-size: 50
+        sliding-window-type: COUNT_BASED
+        record-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - org.springframework.web.client.ResourceAccessException
+      fraud-detection-service:
+        register-health-indicator: true
+        failure-rate-threshold: 40
+        minimum-number-of-calls: 20
+        wait-duration-in-open-state: 60s
+        sliding-window-size: 100
+        
+# Retry Configuration
+  retry:
+    instances:
+      database:
+        max-attempts: 3
+        wait-duration: 5s
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - org.springframework.dao.DataAccessException
+          - java.sql.SQLException
+          - org.springframework.dao.QueryTimeoutException
+      external-api:
+        max-attempts: 3
+        wait-duration: 2s
+        retry-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+
+# Timeout Configuration
+  timelimiter:
+    instances:
+      notification-service:
+        timeout-duration: 30s
+        cancel-running-future: true
+      fraud-detection-service:
+        timeout-duration: 5s
+        cancel-running-future: true
+
+# Bulkhead Configuration
+  bulkhead:
+    instances:
+      database:
+        max-concurrent-calls: 25
+        max-wait-duration: 1s
+      external-api:
+        max-concurrent-calls: 10
+        max-wait-duration: 500ms
+
+# Cache Configuration
+cache:
+  redis:
+    ttl:
+      user-profile: 1800  # 30 minutes
+      user-sessions: 3600  # 1 hour
+      permissions: 14400  # 4 hours
+      user-roles: 7200   # 2 hours
+    prefix: "prod:user-service:"
+    
+# Security Configuration
+security:
+  require-ssl: true
+  hsts:
+    max-age: 31536000
+    include-subdomains: true
+  content-security-policy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; font-src 'self'; object-src 'none'; media-src 'self'; frame-src 'none'"
+  frame-options: DENY
+  content-type-options: nosniff
+  xss-protection: "1; mode=block"
+  referrer-policy: "strict-origin-when-cross-origin"
+
+# Monitoring Configuration
+monitoring:
+  metrics:
+    enabled: true
+    export-interval: 30s
+    jvm-metrics: true
+    system-metrics: true
+    custom-metrics: true
+  tracing:
+    enabled: true
+    sample-rate: 0.01  # 1% sampling for production
+  health-check:
+    interval: 30s
+    timeout: 10s
+  alerts:
+    enabled: true
+    thresholds:
+      response-time-p99: 500ms
+      error-rate: 0.01  # 1%
+      memory-usage: 0.85  # 85%
+      cpu-usage: 0.80  # 80%
+
+# Performance Configuration
+performance:
+  async:
+    core-pool-size: 10
+    max-pool-size: 50
+    queue-capacity: 100
+    thread-name-prefix: "user-service-async-"
+  
+# Audit Configuration
+audit:
+  enabled: true
+  retention-days: 365
+  events:
+    - USER_LOGIN
+    - USER_LOGOUT
+    - USER_REGISTRATION
+    - PASSWORD_CHANGE
+    - PROFILE_UPDATE
+    - AUTHENTICATION_FAILURE
+
+# Graceful Shutdown
+server:
+  shutdown: graceful
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s

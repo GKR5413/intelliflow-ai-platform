@@ -1,0 +1,94 @@
+# IntelliFlow Fraud Detection Service - Python Dependencies
+
+# Core Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Machine Learning
+scikit-learn==1.3.2
+xgboost==2.0.2
+lightgbm==4.1.0
+tensorflow==2.15.0
+torch==2.1.1
+onnx==1.15.0
+onnxruntime==1.16.3
+joblib==1.3.2
+numpy==1.24.4
+pandas==2.1.4
+scipy==1.11.4
+
+# Feature Engineering
+feast[redis]==0.34.1
+great-expectations==0.18.3
+category-encoders==2.6.3
+
+# Data Processing
+redis==5.0.1
+asyncpg==0.29.0
+pymongo==4.6.0
+kafka-python==2.0.2
+aiokafka==0.9.0
+
+# Monitoring & Observability
+prometheus-client==0.19.0
+structlog==23.2.0
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-instrumentation-fastapi==0.42b0
+opentelemetry-instrumentation-requests==0.42b0
+
+# Security & Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+
+# HTTP & API
+httpx==0.25.2
+aiohttp==3.9.1
+requests==2.31.0
+
+# Utilities
+python-dotenv==1.0.0
+click==8.1.7
+typer==0.9.0
+rich==13.7.0
+pyyaml==6.0.1
+toml==0.10.2
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+httpx-test==0.25.2
+factory-boy==3.3.0
+faker==20.1.0
+
+# Code Quality
+black==23.11.0
+flake8==6.1.0
+mypy==1.7.1
+isort==5.12.0
+pre-commit==3.6.0
+
+# Development
+ipython==8.17.2
+jupyter==1.0.0
+notebook==7.0.6
+
+# Model Optimization
+onnxmltools==1.11.2
+tf2onnx==1.15.1
+tensorrt==8.6.1.post1; platform_machine=="x86_64"
+openvino==2023.2.0
+
+# Cloud & Storage
+boto3==1.34.0
+minio==7.2.0
+azure-storage-blob==12.19.0
+
+# Async Support
+asyncio-mqtt==0.16.1
+aiofiles==23.2.1

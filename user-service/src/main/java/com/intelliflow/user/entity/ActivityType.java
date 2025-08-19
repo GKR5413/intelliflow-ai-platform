@@ -1,0 +1,16 @@
+package com.intelliflow.user.entity;
+
+public enum ActivityType {
+    REGISTRATION,
+    LOGIN,
+    LOGOUT,
+    PASSWORD_CHANGE,
+    PASSWORD_RESET,
+    EMAIL_VERIFICATION,
+    PROFILE_UPDATE,
+    TWO_FACTOR_ENABLE,
+    TWO_FACTOR_DISABLE,
+    ACCOUNT_LOCK,
+    ACCOUNT_UNLOCK,
+    SUSPICIOUS_ACTIVITY
+}

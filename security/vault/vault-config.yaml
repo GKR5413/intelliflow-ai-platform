@@ -1,0 +1,741 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: intelliflow-security
+  labels:
+    app: vault
+    component: config
+data:
+  vault.hcl: |
+    ui = true
+    disable_mlock = true
+    
+    api_addr = "https://vault.intelliflow.com"
+    cluster_addr = "https://vault-internal:8201"
+    
+    storage "consul" {
+      address = "consul:8500"
+      path = "vault/"
+      consistency_mode = "strong"
+      disable_clustering = "false"
+      session_ttl = "15s"
+      lock_wait_time = "15s"
+    }
+    
+    listener "tcp" {
+      address = "0.0.0.0:8200"
+      cluster_address = "0.0.0.0:8201"
+      tls_cert_file = "/vault/tls/tls.crt"
+      tls_key_file = "/vault/tls/tls.key"
+      tls_min_version = "tls12"
+      tls_cipher_suites = "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+      tls_prefer_server_cipher_suites = "true"
+      tls_disable_client_certs = "false"
+    }
+    
+    telemetry {
+      prometheus_retention_time = "30s"
+      disable_hostname = true
+      enable_hostname_label = false
+    }
+    
+    log_level = "INFO"
+    log_format = "json"
+    
+    # Enable secret engines
+    path "secret/" {
+      type = "kv-v2"
+      description = "General purpose secret storage"
+      config = {
+        max_versions = 10
+        cas_required = false
+        delete_version_after = "3h"
+      }
+    }
+    
+    path "database/" {
+      type = "database"
+      description = "Database credentials"
+    }
+    
+    path "pki/" {
+      type = "pki"
+      description = "IntelliFlow PKI"
+      config = {
+        max_lease_ttl = "87600h"
+      }
+    }
+    
+    path "transit/" {
+      type = "transit"
+      description = "Encryption as a Service"
+    }
+    
+    path "aws/" {
+      type = "aws"
+      description = "AWS credentials"
+    }
+    
+    path "kubernetes/" {
+      type = "kubernetes"
+      description = "Kubernetes authentication"
+    }
+  
+  vault-init.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "Waiting for Vault to be ready..."
+    while ! vault status &>/dev/null; do
+      sleep 2
+    done
+    
+    echo "Initializing Vault..."
+    
+    # Initialize Vault if not already initialized
+    if ! vault status | grep -q "Initialized.*true"; then
+      echo "Vault not initialized. Initializing..."
+      vault operator init \
+        -key-shares=5 \
+        -key-threshold=3 \
+        -format=json > /vault/data/init.json
+      
+      echo "Vault initialized. Unsealing..."
+      
+      # Extract unseal keys and root token
+      UNSEAL_KEY_1=$(cat /vault/data/init.json | jq -r '.unseal_keys_b64[0]')
+      UNSEAL_KEY_2=$(cat /vault/data/init.json | jq -r '.unseal_keys_b64[1]')
+      UNSEAL_KEY_3=$(cat /vault/data/init.json | jq -r '.unseal_keys_b64[2]')
+      ROOT_TOKEN=$(cat /vault/data/init.json | jq -r '.root_token')
+      
+      # Unseal Vault
+      vault operator unseal $UNSEAL_KEY_1
+      vault operator unseal $UNSEAL_KEY_2
+      vault operator unseal $UNSEAL_KEY_3
+      
+      # Login with root token
+      vault auth $ROOT_TOKEN
+      
+      echo "Configuring Vault..."
+      
+      # Enable audit logging
+      vault audit enable file file_path=/vault/logs/audit.log
+      
+      # Enable secret engines
+      vault secrets enable -path=secret kv-v2
+      vault secrets enable -path=database database
+      vault secrets enable -path=pki pki
+      vault secrets enable -path=transit transit
+      vault secrets enable -path=aws aws
+      
+      # Configure PKI
+      vault secrets tune -max-lease-ttl=87600h pki
+      vault write pki/root/generate/internal \
+        common_name="IntelliFlow Root CA" \
+        ttl=87600h
+      
+      vault write pki/config/urls \
+        issuing_certificates="https://vault.intelliflow.com/v1/pki/ca" \
+        crl_distribution_points="https://vault.intelliflow.com/v1/pki/crl"
+      
+      vault write pki/roles/intelliflow-dot-com \
+        allowed_domains="intelliflow.com" \
+        allow_subdomains=true \
+        max_ttl="720h"
+      
+      # Configure database connections
+      vault write database/config/postgres \
+        plugin_name=postgresql-database-plugin \
+        connection_url="postgresql://{{username}}:{{password}}@postgres:5432/postgres?sslmode=disable" \
+        allowed_roles="readonly,readwrite" \
+        username="vault" \
+        password="vault_password"
+      
+      vault write database/roles/readonly \
+        db_name=postgres \
+        creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}'; GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{name}}\";" \
+        default_ttl="1h" \
+        max_ttl="24h"
+      
+      vault write database/roles/readwrite \
+        db_name=postgres \
+        creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}'; GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"{{name}}\";" \
+        default_ttl="1h" \
+        max_ttl="24h"
+      
+      # Configure Kubernetes auth
+      vault auth enable kubernetes
+      
+      vault write auth/kubernetes/config \
+        token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+        kubernetes_host="https://$KUBERNETES_PORT_443_TCP_ADDR:443" \
+        kubernetes_ca_cert="$(cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt)"
+      
+      # Create policies
+      vault policy write intelliflow-policy - <<EOF
+    # Read-only access to secret/data/intelliflow/*
+    path "secret/data/intelliflow/*" {
+      capabilities = ["read"]
+    }
+    
+    # Read database credentials
+    path "database/creds/readonly" {
+      capabilities = ["read"]
+    }
+    
+    # Read-write database credentials for applications
+    path "database/creds/readwrite" {
+      capabilities = ["read"]
+    }
+    
+    # Encrypt/decrypt with transit engine
+    path "transit/encrypt/intelliflow" {
+      capabilities = ["update"]
+    }
+    
+    path "transit/decrypt/intelliflow" {
+      capabilities = ["update"]
+    }
+    
+    # Generate certificates
+    path "pki/issue/intelliflow-dot-com" {
+      capabilities = ["update"]
+    }
+    EOF
+      
+      vault policy write fraud-detection-policy - <<EOF
+    # Access to fraud detection secrets
+    path "secret/data/fraud-detection/*" {
+      capabilities = ["read"]
+    }
+    
+    # Access to ML model encryption keys
+    path "transit/encrypt/ml-models" {
+      capabilities = ["update"]
+    }
+    
+    path "transit/decrypt/ml-models" {
+      capabilities = ["update"]
+    }
+    
+    # Database access
+    path "database/creds/readwrite" {
+      capabilities = ["read"]
+    }
+    
+    # AWS credentials for S3 model storage
+    path "aws/creds/ml-models" {
+      capabilities = ["read"]
+    }
+    EOF
+      
+      vault policy write admin-policy - <<EOF
+    # Full access to secret engine
+    path "secret/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+    
+    # Manage database connections
+    path "database/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+    
+    # Manage PKI
+    path "pki/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+    
+    # Manage policies
+    path "sys/policies/acl/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+    
+    # Manage auth methods
+    path "sys/auth/*" {
+      capabilities = ["create", "read", "update", "delete", "sudo"]
+    }
+    
+    # Manage secret engines
+    path "sys/mounts/*" {
+      capabilities = ["create", "read", "update", "delete", "sudo"]
+    }
+    EOF
+      
+      # Create Kubernetes roles
+      vault write auth/kubernetes/role/intelliflow-role \
+        bound_service_account_names=user-service,transaction-service,analytics-service \
+        bound_service_account_namespaces=intelliflow-prod,intelliflow-staging \
+        policies=intelliflow-policy \
+        ttl=1h
+      
+      vault write auth/kubernetes/role/fraud-detection-role \
+        bound_service_account_names=fraud-detection-service,ai-orchestrator \
+        bound_service_account_namespaces=intelliflow-prod,intelliflow-staging \
+        policies=fraud-detection-policy \
+        ttl=1h
+      
+      vault write auth/kubernetes/role/admin-role \
+        bound_service_account_names=vault-admin \
+        bound_service_account_namespaces=intelliflow-security \
+        policies=admin-policy \
+        ttl=8h
+      
+      # Create transit encryption keys
+      vault write -f transit/keys/intelliflow
+      vault write -f transit/keys/ml-models
+      vault write -f transit/keys/user-data
+      vault write -f transit/keys/transaction-data
+      
+      # Store initial secrets
+      vault kv put secret/intelliflow/database \
+        username="intelliflow_user" \
+        password="SecureDBPassword123!" \
+        host="postgres.intelliflow-prod.svc.cluster.local" \
+        port="5432"
+      
+      vault kv put secret/intelliflow/redis \
+        password="RedisSecurePass789!" \
+        host="redis.intelliflow-prod.svc.cluster.local" \
+        port="6379"
+      
+      vault kv put secret/intelliflow/jwt \
+        secret="MyVerySecureJWTSigningKey2024!@#$%^&*()" \
+        expiration="86400" \
+        refresh_expiration="604800"
+      
+      vault kv put secret/fraud-detection/models \
+        s3_bucket="intelliflow-ml-models" \
+        model_encryption_key="fraud_model_key_v1" \
+        feature_store_url="https://feature-store.intelliflow.com"
+      
+      vault kv put secret/fraud-detection/api \
+        api_key="fraud_api_key_prod_2024" \
+        webhook_secret="fraud_webhook_secret_123"
+      
+      # Configure AWS secrets engine
+      vault write aws/config/root \
+        access_key="${AWS_ACCESS_KEY_ID}" \
+        secret_key="${AWS_SECRET_ACCESS_KEY}" \
+        region="us-west-2"
+      
+      vault write aws/roles/ml-models \
+        credential_type=iam_user \
+        policy_document='{
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": "arn:aws:s3:::intelliflow-ml-models/*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": "arn:aws:s3:::intelliflow-ml-models"
+            }
+          ]
+        }'
+      
+      echo "Vault configuration completed successfully!"
+    else
+      echo "Vault already initialized."
+    fi
+  
+  consul.json: |
+    {
+      "datacenter": "intelliflow",
+      "data_dir": "/consul/data",
+      "log_level": "INFO",
+      "node_name": "consul-vault-backend",
+      "server": true,
+      "bootstrap_expect": 1,
+      "ui_config": {
+        "enabled": true
+      },
+      "connect": {
+        "enabled": true
+      },
+      "client_addr": "0.0.0.0",
+      "retry_join": [],
+      "encrypt": "${CONSUL_ENCRYPT_KEY}",
+      "ca_file": "/consul/tls/ca.crt",
+      "cert_file": "/consul/tls/consul.crt",
+      "key_file": "/consul/tls/consul.key",
+      "verify_incoming": true,
+      "verify_outgoing": true,
+      "verify_server_hostname": true,
+      "ports": {
+        "grpc": 8502,
+        "https": 8501
+      },
+      "acl": {
+        "enabled": true,
+        "default_policy": "deny",
+        "enable_token_persistence": true
+      }
+    }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: intelliflow-security
+  labels:
+    app: vault
+    component: vault-server
+spec:
+  serviceName: vault-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vault
+  template:
+    metadata:
+      labels:
+        app: vault
+    spec:
+      serviceAccountName: vault
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: vault
+        image: vault:1.15.2
+        imagePullPolicy: IfNotPresent
+        args:
+          - "vault"
+          - "server"
+          - "-config=/vault/config/vault.hcl"
+        ports:
+        - name: vault
+          containerPort: 8200
+          protocol: TCP
+        - name: vault-internal
+          containerPort: 8201
+          protocol: TCP
+        env:
+        - name: VAULT_ADDR
+          value: "https://127.0.0.1:8200"
+        - name: VAULT_API_ADDR
+          value: "https://vault.intelliflow.com"
+        - name: VAULT_CLUSTER_ADDR
+          value: "https://$(HOSTNAME).vault-headless:8201"
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: VAULT_RAFT_NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: VAULT_LOCAL_CONFIG
+          value: |
+            ui = true
+            disable_mlock = true
+            storage "raft" {
+              path = "/vault/data"
+              node_id = "$(VAULT_RAFT_NODE_ID)"
+              retry_join {
+                leader_api_addr = "https://vault-0.vault-headless:8200"
+              }
+              retry_join {
+                leader_api_addr = "https://vault-1.vault-headless:8200"
+              }
+              retry_join {
+                leader_api_addr = "https://vault-2.vault-headless:8200"
+              }
+            }
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        volumeMounts:
+        - name: vault-config
+          mountPath: /vault/config
+        - name: vault-data
+          mountPath: /vault/data
+        - name: vault-logs
+          mountPath: /vault/logs
+        - name: vault-tls
+          mountPath: /vault/tls
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        livenessProbe:
+          httpGet:
+            path: /v1/sys/health?standbyok=true
+            port: 8200
+            scheme: HTTPS
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+            port: 8200
+            scheme: HTTPS
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: vault-config
+        configMap:
+          name: vault-config
+      - name: vault-tls
+        secret:
+          secretName: vault-tls
+      - name: vault-logs
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: vault-data
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: intelliflow-security
+  labels:
+    app: vault
+spec:
+  type: ClusterIP
+  ports:
+  - name: vault
+    port: 8200
+    targetPort: 8200
+  - name: vault-internal
+    port: 8201
+    targetPort: 8201
+  selector:
+    app: vault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-headless
+  namespace: intelliflow-security
+  labels:
+    app: vault
+spec:
+  clusterIP: None
+  ports:
+  - name: vault
+    port: 8200
+    targetPort: 8200
+  - name: vault-internal
+    port: 8201
+    targetPort: 8201
+  selector:
+    app: vault
+---
+# Vault Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: intelliflow-security
+  labels:
+    app: vault
+---
+# Vault Unsealer Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-unsealer
+  namespace: intelliflow-security
+  labels:
+    app: vault
+    component: unsealer
+spec:
+  template:
+    metadata:
+      labels:
+        app: vault-unsealer
+    spec:
+      serviceAccountName: vault
+      restartPolicy: OnFailure
+      containers:
+      - name: vault-unsealer
+        image: vault:1.15.2
+        command:
+        - /bin/sh
+        - -c
+        - |
+          apk add --no-cache jq curl
+          
+          # Wait for Vault to be available
+          until vault status &>/dev/null; do
+            echo "Waiting for Vault..."
+            sleep 5
+          done
+          
+          # Check if Vault is already unsealed
+          if vault status | grep -q "Sealed.*false"; then
+            echo "Vault is already unsealed"
+            exit 0
+          fi
+          
+          # Check if init keys exist
+          if [ -f /vault/init/unseal-keys ]; then
+            echo "Using existing unseal keys"
+            while IFS= read -r key; do
+              vault operator unseal "$key" || true
+            done < /vault/init/unseal-keys
+          else
+            echo "No unseal keys found. Manual unsealing required."
+            exit 1
+          fi
+        env:
+        - name: VAULT_ADDR
+          value: "https://vault:8200"
+        - name: VAULT_SKIP_VERIFY
+          value: "true"
+        volumeMounts:
+        - name: vault-init
+          mountPath: /vault/init
+          readOnly: true
+      volumes:
+      - name: vault-init
+        secret:
+          secretName: vault-init-keys
+          optional: true
+---
+# External Secrets Operator integration
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: vault-secret-store
+  namespace: intelliflow-prod
+  labels:
+    component: external-secrets
+spec:
+  provider:
+    vault:
+      server: "https://vault.intelliflow-security.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "intelliflow-role"
+          serviceAccountRef:
+            name: "user-service"
+---
+# Example External Secret
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: intelliflow-database-secret
+  namespace: intelliflow-prod
+  labels:
+    component: external-secrets
+spec:
+  refreshInterval: 15m
+  secretStoreRef:
+    name: vault-secret-store
+    kind: SecretStore
+  target:
+    name: database-credentials
+    creationPolicy: Owner
+  data:
+  - secretKey: username
+    remoteRef:
+      key: intelliflow/database
+      property: username
+  - secretKey: password
+    remoteRef:
+      key: intelliflow/database
+      property: password
+  - secretKey: host
+    remoteRef:
+      key: intelliflow/database
+      property: host
+  - secretKey: port
+    remoteRef:
+      key: intelliflow/database
+      property: port
+---
+# Vault Agent Injector Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-agent-config
+  namespace: intelliflow-prod
+  labels:
+    app: vault-agent
+data:
+  vault-agent.hcl: |
+    pid_file = "/tmp/pidfile"
+    
+    vault {
+      address = "https://vault.intelliflow-security.svc.cluster.local:8200"
+      tls_skip_verify = true
+    }
+    
+    auto_auth {
+      method "kubernetes" {
+        mount_path = "auth/kubernetes"
+        config = {
+          role = "intelliflow-role"
+        }
+      }
+      
+      sink "file" {
+        config = {
+          path = "/vault/secrets/token"
+        }
+      }
+    }
+    
+    template {
+      source = "/vault/templates/database.tpl"
+      destination = "/vault/secrets/database"
+      perms = 0644
+    }
+    
+    template {
+      source = "/vault/templates/redis.tpl"
+      destination = "/vault/secrets/redis"
+      perms = 0644
+    }
+  
+  database.tpl: |
+    {{- with secret "secret/data/intelliflow/database" -}}
+    DATABASE_URL=postgresql://{{ .Data.data.username }}:{{ .Data.data.password }}@{{ .Data.data.host }}:{{ .Data.data.port }}/intelliflow
+    DB_USERNAME={{ .Data.data.username }}
+    DB_PASSWORD={{ .Data.data.password }}
+    DB_HOST={{ .Data.data.host }}
+    DB_PORT={{ .Data.data.port }}
+    {{- end -}}
+  
+  redis.tpl: |
+    {{- with secret "secret/data/intelliflow/redis" -}}
+    REDIS_URL=redis://:{{ .Data.data.password }}@{{ .Data.data.host }}:{{ .Data.data.port }}
+    REDIS_PASSWORD={{ .Data.data.password }}
+    REDIS_HOST={{ .Data.data.host }}
+    REDIS_PORT={{ .Data.data.port }}
+    {{- end -}}

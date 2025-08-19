@@ -1,0 +1,674 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: business-metrics-config
+  namespace: intelliflow-prod
+  labels:
+    app: business-metrics-exporter
+    component: config
+data:
+  config.yaml: |
+    server:
+      port: 8080
+      metrics_path: /metrics
+      health_path: /health
+    
+    database:
+      url: postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres-service:5432/intelliflow
+      max_connections: 10
+      connection_timeout: 30s
+    
+    redis:
+      url: redis://:${REDIS_PASSWORD}@redis-service:6379/2
+      pool_size: 10
+    
+    metrics:
+      collection_interval: 30s
+      cache_ttl: 60s
+      
+      queries:
+        # Transaction Metrics
+        - name: transaction_count_total
+          help: "Total number of transactions processed"
+          type: counter
+          query: |
+            SELECT 
+              status,
+              transaction_type,
+              COUNT(*) as count
+            FROM transactions 
+            WHERE created_at >= NOW() - INTERVAL '5 minutes'
+            GROUP BY status, transaction_type
+          labels: ["status", "transaction_type"]
+          value_column: "count"
+        
+        - name: transaction_amount_total
+          help: "Total transaction amount processed"
+          type: counter
+          query: |
+            SELECT 
+              currency,
+              status,
+              SUM(amount) as total_amount
+            FROM transactions 
+            WHERE created_at >= NOW() - INTERVAL '5 minutes'
+            GROUP BY currency, status
+          labels: ["currency", "status"]
+          value_column: "total_amount"
+        
+        - name: transaction_processing_duration_seconds
+          help: "Transaction processing duration histogram"
+          type: histogram
+          buckets: [0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]
+          query: |
+            SELECT 
+              EXTRACT(EPOCH FROM (completed_at - created_at)) as duration
+            FROM transactions 
+            WHERE completed_at IS NOT NULL 
+            AND created_at >= NOW() - INTERVAL '5 minutes'
+          value_column: "duration"
+        
+        # Fraud Detection Metrics
+        - name: fraud_detection_count_total
+          help: "Total number of fraud detection checks"
+          type: counter
+          query: |
+            SELECT 
+              fraud_score_range,
+              is_fraud,
+              COUNT(*) as count
+            FROM (
+              SELECT 
+                CASE 
+                  WHEN fraud_score < 0.3 THEN 'low'
+                  WHEN fraud_score < 0.7 THEN 'medium'
+                  ELSE 'high'
+                END as fraud_score_range,
+                CASE 
+                  WHEN fraud_score >= 0.5 THEN 'true'
+                  ELSE 'false'
+                END as is_fraud
+              FROM fraud_checks 
+              WHERE created_at >= NOW() - INTERVAL '5 minutes'
+            ) sub
+            GROUP BY fraud_score_range, is_fraud
+          labels: ["fraud_score_range", "is_fraud"]
+          value_column: "count"
+        
+        - name: fraud_detection_accuracy
+          help: "Fraud detection model accuracy"
+          type: gauge
+          query: |
+            SELECT 
+              model_name,
+              accuracy
+            FROM model_performance 
+            WHERE updated_at >= NOW() - INTERVAL '1 hour'
+            ORDER BY updated_at DESC
+            LIMIT 1
+          labels: ["model_name"]
+          value_column: "accuracy"
+        
+        # User Metrics
+        - name: user_registrations_total
+          help: "Total number of user registrations"
+          type: counter
+          query: |
+            SELECT 
+              status,
+              COUNT(*) as count
+            FROM users 
+            WHERE created_at >= NOW() - INTERVAL '5 minutes'
+            GROUP BY status
+          labels: ["status"]
+          value_column: "count"
+        
+        - name: active_users_count
+          help: "Number of active users"
+          type: gauge
+          query: |
+            SELECT 
+              time_window,
+              COUNT(DISTINCT user_id) as count
+            FROM (
+              SELECT '5m' as time_window, user_id 
+              FROM user_sessions 
+              WHERE last_activity >= NOW() - INTERVAL '5 minutes'
+              UNION ALL
+              SELECT '1h' as time_window, user_id 
+              FROM user_sessions 
+              WHERE last_activity >= NOW() - INTERVAL '1 hour'
+              UNION ALL
+              SELECT '24h' as time_window, user_id 
+              FROM user_sessions 
+              WHERE last_activity >= NOW() - INTERVAL '24 hours'
+            ) sub
+            GROUP BY time_window
+          labels: ["time_window"]
+          value_column: "count"
+        
+        # System Performance Metrics
+        - name: api_response_time_seconds
+          help: "API response time histogram"
+          type: histogram
+          buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+          query: |
+            SELECT 
+              endpoint,
+              method,
+              status_code,
+              response_time / 1000.0 as response_time_seconds
+            FROM api_logs 
+            WHERE timestamp >= NOW() - INTERVAL '5 minutes'
+          labels: ["endpoint", "method", "status_code"]
+          value_column: "response_time_seconds"
+        
+        - name: error_rate
+          help: "Error rate by service"
+          type: gauge
+          query: |
+            SELECT 
+              service_name,
+              (error_count::float / total_count::float) as error_rate
+            FROM (
+              SELECT 
+                service_name,
+                SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as error_count,
+                COUNT(*) as total_count
+              FROM api_logs 
+              WHERE timestamp >= NOW() - INTERVAL '5 minutes'
+              GROUP BY service_name
+            ) sub
+            WHERE total_count > 0
+          labels: ["service_name"]
+          value_column: "error_rate"
+        
+        # Business KPIs
+        - name: revenue_total
+          help: "Total revenue generated"
+          type: counter
+          query: |
+            SELECT 
+              currency,
+              SUM(amount) as revenue
+            FROM transactions 
+            WHERE status = 'completed'
+            AND transaction_type = 'payment'
+            AND created_at >= NOW() - INTERVAL '5 minutes'
+            GROUP BY currency
+          labels: ["currency"]
+          value_column: "revenue"
+        
+        - name: customer_acquisition_count
+          help: "New customer acquisition count"
+          type: counter
+          query: |
+            SELECT 
+              acquisition_channel,
+              COUNT(*) as count
+            FROM users 
+            WHERE status = 'active'
+            AND created_at >= NOW() - INTERVAL '5 minutes'
+            GROUP BY acquisition_channel
+          labels: ["acquisition_channel"]
+          value_column: "count"
+        
+        # ML Model Performance
+        - name: model_inference_duration_seconds
+          help: "ML model inference duration"
+          type: histogram
+          buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+          query: |
+            SELECT 
+              model_name,
+              inference_time / 1000.0 as duration_seconds
+            FROM ml_inference_logs 
+            WHERE timestamp >= NOW() - INTERVAL '5 minutes'
+          labels: ["model_name"]
+          value_column: "duration_seconds"
+        
+        - name: model_prediction_count_total
+          help: "Total number of model predictions"
+          type: counter
+          query: |
+            SELECT 
+              model_name,
+              model_version,
+              prediction_outcome,
+              COUNT(*) as count
+            FROM ml_predictions 
+            WHERE created_at >= NOW() - INTERVAL '5 minutes'
+            GROUP BY model_name, model_version, prediction_outcome
+          labels: ["model_name", "model_version", "prediction_outcome"]
+          value_column: "count"
+  
+  exporter.py: |
+    #!/usr/bin/env python3
+    """
+    Business Metrics Exporter for IntelliFlow Platform
+    
+    Collects business and application metrics from database and exposes
+    them in Prometheus format.
+    """
+    
+    import asyncio
+    import asyncpg
+    import aioredis
+    import yaml
+    import logging
+    import time
+    import os
+    from datetime import datetime, timedelta
+    from typing import Dict, List, Any, Optional
+    from dataclasses import dataclass
+    from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    from aiohttp import web
+    import json
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
+    @dataclass
+    class MetricConfig:
+        name: str
+        help: str
+        metric_type: str
+        query: str
+        labels: List[str]
+        value_column: str
+        buckets: Optional[List[float]] = None
+    
+    class BusinessMetricsExporter:
+        def __init__(self, config_path: str):
+            with open(config_path, 'r') as f:
+                self.config = yaml.safe_load(f)
+            
+            self.db_pool = None
+            self.redis_client = None
+            self.metrics = {}
+            self.last_collection = {}
+            
+            # Initialize Prometheus metrics
+            self._init_prometheus_metrics()
+    
+        def _init_prometheus_metrics(self):
+            """Initialize Prometheus metrics based on configuration"""
+            for metric_config in self.config['metrics']['queries']:
+                config = MetricConfig(**metric_config)
+                
+                if config.metric_type == 'counter':
+                    self.metrics[config.name] = Counter(
+                        config.name, 
+                        config.help, 
+                        config.labels
+                    )
+                elif config.metric_type == 'gauge':
+                    self.metrics[config.name] = Gauge(
+                        config.name, 
+                        config.help, 
+                        config.labels
+                    )
+                elif config.metric_type == 'histogram':
+                    buckets = config.buckets or [0.1, 0.5, 1.0, 2.5, 5.0, 10.0]
+                    self.metrics[config.name] = Histogram(
+                        config.name, 
+                        config.help, 
+                        config.labels,
+                        buckets=buckets
+                    )
+                
+                logger.info(f"Initialized metric: {config.name} ({config.metric_type})")
+    
+        async def start(self):
+            """Start the metrics exporter"""
+            await self._connect_db()
+            await self._connect_redis()
+            
+            # Start collection loop
+            asyncio.create_task(self._collection_loop())
+            
+            # Start web server
+            app = web.Application()
+            app.router.add_get('/metrics', self._handle_metrics)
+            app.router.add_get('/health', self._handle_health)
+            
+            runner = web.AppRunner(app)
+            await runner.setup()
+            
+            site = web.TCPSite(runner, '0.0.0.0', self.config['server']['port'])
+            await site.start()
+            
+            logger.info(f"Business metrics exporter started on port {self.config['server']['port']}")
+    
+        async def _connect_db(self):
+            """Connect to PostgreSQL database"""
+            db_config = self.config['database']
+            self.db_pool = await asyncpg.create_pool(
+                db_config['url'].format(
+                    DB_USERNAME=os.getenv('DB_USERNAME'),
+                    DB_PASSWORD=os.getenv('DB_PASSWORD')
+                ),
+                max_size=db_config['max_connections'],
+                command_timeout=db_config['connection_timeout']
+            )
+            logger.info("Connected to PostgreSQL database")
+    
+        async def _connect_redis(self):
+            """Connect to Redis for caching"""
+            redis_config = self.config['redis']
+            self.redis_client = aioredis.from_url(
+                redis_config['url'].format(
+                    REDIS_PASSWORD=os.getenv('REDIS_PASSWORD')
+                ),
+                max_connections=redis_config['pool_size']
+            )
+            logger.info("Connected to Redis")
+    
+        async def _collection_loop(self):
+            """Main collection loop"""
+            interval = self.config['metrics']['collection_interval']
+            interval_seconds = self._parse_duration(interval)
+            
+            while True:
+                try:
+                    start_time = time.time()
+                    await self._collect_metrics()
+                    collection_time = time.time() - start_time
+                    
+                    logger.info(f"Metrics collection completed in {collection_time:.2f}s")
+                    
+                    # Sleep for the remaining interval
+                    sleep_time = max(0, interval_seconds - collection_time)
+                    await asyncio.sleep(sleep_time)
+                    
+                except Exception as e:
+                    logger.error(f"Error in collection loop: {e}")
+                    await asyncio.sleep(10)  # Wait before retrying
+    
+        async def _collect_metrics(self):
+            """Collect all configured metrics"""
+            for metric_config_dict in self.config['metrics']['queries']:
+                config = MetricConfig(**metric_config_dict)
+                
+                try:
+                    # Check cache first
+                    cached_data = await self._get_cached_metric(config.name)
+                    if cached_data:
+                        await self._update_metric(config, cached_data)
+                        continue
+                    
+                    # Collect from database
+                    async with self.db_pool.acquire() as conn:
+                        rows = await conn.fetch(config.query)
+                        
+                        if rows:
+                            data = [dict(row) for row in rows]
+                            await self._cache_metric(config.name, data)
+                            await self._update_metric(config, data)
+                            
+                            logger.debug(f"Collected {len(rows)} rows for metric {config.name}")
+                        else:
+                            logger.warning(f"No data returned for metric {config.name}")
+                            
+                except Exception as e:
+                    logger.error(f"Error collecting metric {config.name}: {e}")
+    
+        async def _update_metric(self, config: MetricConfig, data: List[Dict]):
+            """Update Prometheus metric with collected data"""
+            metric = self.metrics[config.name]
+            
+            try:
+                if config.metric_type == 'histogram':
+                    # For histograms, observe each value
+                    for row in data:
+                        value = float(row[config.value_column])
+                        label_values = [str(row.get(label, '')) for label in config.labels]
+                        metric.labels(*label_values).observe(value)
+                
+                elif config.metric_type == 'counter':
+                    # For counters, increment by the value
+                    for row in data:
+                        value = float(row[config.value_column])
+                        label_values = [str(row.get(label, '')) for label in config.labels]
+                        
+                        # Get the current value to calculate increment
+                        current_key = f"{config.name}:{':'.join(label_values)}"
+                        last_value = self.last_collection.get(current_key, 0)
+                        increment = max(0, value - last_value)
+                        
+                        if increment > 0:
+                            metric.labels(*label_values).inc(increment)
+                        
+                        self.last_collection[current_key] = value
+                
+                elif config.metric_type == 'gauge':
+                    # For gauges, set the value directly
+                    for row in data:
+                        value = float(row[config.value_column])
+                        label_values = [str(row.get(label, '')) for label in config.labels]
+                        metric.labels(*label_values).set(value)
+                
+            except Exception as e:
+                logger.error(f"Error updating metric {config.name}: {e}")
+    
+        async def _cache_metric(self, metric_name: str, data: List[Dict]):
+            """Cache metric data in Redis"""
+            try:
+                cache_key = f"metrics:{metric_name}"
+                cache_ttl = self._parse_duration(self.config['metrics']['cache_ttl'])
+                
+                await self.redis_client.setex(
+                    cache_key,
+                    cache_ttl,
+                    json.dumps(data, default=str)
+                )
+            except Exception as e:
+                logger.warning(f"Failed to cache metric {metric_name}: {e}")
+    
+        async def _get_cached_metric(self, metric_name: str) -> Optional[List[Dict]]:
+            """Get cached metric data from Redis"""
+            try:
+                cache_key = f"metrics:{metric_name}"
+                cached_data = await self.redis_client.get(cache_key)
+                
+                if cached_data:
+                    return json.loads(cached_data)
+            except Exception as e:
+                logger.warning(f"Failed to get cached metric {metric_name}: {e}")
+            
+            return None
+    
+        def _parse_duration(self, duration_str: str) -> int:
+            """Parse duration string to seconds"""
+            if duration_str.endswith('s'):
+                return int(duration_str[:-1])
+            elif duration_str.endswith('m'):
+                return int(duration_str[:-1]) * 60
+            elif duration_str.endswith('h'):
+                return int(duration_str[:-1]) * 3600
+            else:
+                return int(duration_str)
+    
+        async def _handle_metrics(self, request):
+            """Handle /metrics endpoint"""
+            metrics_data = generate_latest()
+            return web.Response(
+                body=metrics_data,
+                content_type=CONTENT_TYPE_LATEST
+            )
+    
+        async def _handle_health(self, request):
+            """Handle /health endpoint"""
+            health_status = {
+                'status': 'healthy',
+                'timestamp': datetime.utcnow().isoformat(),
+                'database': 'connected' if self.db_pool else 'disconnected',
+                'redis': 'connected' if self.redis_client else 'disconnected',
+                'metrics_count': len(self.metrics)
+            }
+            
+            return web.json_response(health_status)
+    
+    async def main():
+        """Main function"""
+        config_path = os.getenv('CONFIG_PATH', '/app/config/config.yaml')
+        exporter = BusinessMetricsExporter(config_path)
+        await exporter.start()
+        
+        # Keep the server running
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except KeyboardInterrupt:
+            logger.info("Shutting down business metrics exporter")
+    
+    if __name__ == '__main__':
+        asyncio.run(main())
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: business-metrics-exporter
+  namespace: intelliflow-prod
+  labels:
+    app: business-metrics-exporter
+    component: monitoring
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: business-metrics-exporter
+  template:
+    metadata:
+      labels:
+        app: business-metrics-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: business-metrics-exporter
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: business-metrics-exporter
+        image: python:3.11-slim
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            pip install asyncpg aioredis pyyaml prometheus-client aiohttp
+            python /app/exporter.py
+        ports:
+        - name: metrics
+          containerPort: 8080
+        env:
+        - name: CONFIG_PATH
+          value: "/app/config/config.yaml"
+        - name: DB_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: database-secrets
+              key: DB_USERNAME
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-secrets
+              key: DB_PASSWORD
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secrets
+              key: REDIS_PASSWORD
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: script-volume
+          mountPath: /app
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config-volume
+        configMap:
+          name: business-metrics-config
+          items:
+          - key: config.yaml
+            path: config.yaml
+      - name: script-volume
+        configMap:
+          name: business-metrics-config
+          items:
+          - key: exporter.py
+            path: exporter.py
+            mode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: business-metrics-exporter
+  namespace: intelliflow-prod
+  labels:
+    app: business-metrics-exporter
+spec:
+  type: ClusterIP
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: business-metrics-exporter
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: business-metrics-exporter
+  namespace: intelliflow-prod
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: business-metrics-exporter
+  namespace: intelliflow-prod
+  labels:
+    app: business-metrics-exporter
+spec:
+  selector:
+    matchLabels:
+      app: business-metrics-exporter
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s

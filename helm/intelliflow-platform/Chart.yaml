@@ -1,0 +1,46 @@
+apiVersion: v2
+name: intelliflow-platform
+description: A comprehensive Helm chart for IntelliFlow AI Platform microservices
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+home: https://github.com/intelliflow/platform
+sources:
+  - https://github.com/intelliflow/platform
+maintainers:
+  - name: IntelliFlow Platform Team
+    email: platform@intelliflow.com
+    url: https://intelliflow.com
+keywords:
+  - microservices
+  - fintech
+  - fraud-detection
+  - ai
+  - machine-learning
+annotations:
+  category: Application
+dependencies:
+  - name: postgresql
+    version: 12.x.x
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+  - name: redis
+    version: 17.x.x
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+  - name: kafka
+    version: 22.x.x
+    repository: https://charts.bitnami.com/bitnami
+    condition: kafka.enabled
+  - name: mongodb
+    version: 13.x.x
+    repository: https://charts.bitnami.com/bitnami
+    condition: mongodb.enabled
+  - name: prometheus
+    version: 23.x.x
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: monitoring.prometheus.enabled
+  - name: grafana
+    version: 6.x.x
+    repository: https://grafana.github.io/helm-charts
+    condition: monitoring.grafana.enabled

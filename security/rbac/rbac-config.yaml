@@ -1,0 +1,436 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: user-service
+  namespace: intelliflow-prod
+  labels:
+    app: user-service
+    component: serviceaccount
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: transaction-service
+  namespace: intelliflow-prod
+  labels:
+    app: transaction-service
+    component: serviceaccount
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fraud-detection-service
+  namespace: intelliflow-prod
+  labels:
+    app: fraud-detection-service
+    component: serviceaccount
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: analytics-service
+  namespace: intelliflow-prod
+  labels:
+    app: analytics-service
+    component: serviceaccount
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-gateway
+  namespace: intelliflow-prod
+  labels:
+    app: api-gateway
+    component: serviceaccount
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-orchestrator
+  namespace: intelliflow-prod
+  labels:
+    app: ai-orchestrator
+    component: serviceaccount
+---
+# Role for microservices - limited permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: intelliflow-prod
+  name: microservice-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+  resourceNames: ["user-service-config", "transaction-service-config", "fraud-detection-config", "analytics-service-config", "api-gateway-config"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["services", "endpoints"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list"]
+---
+# Enhanced role for AI/ML services
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: intelliflow-prod
+  name: ml-service-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "create"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "patch"]
+  resourceNames: ["fraud-detection-service", "ai-orchestrator"]
+---
+# Role for API Gateway - broader service discovery
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: intelliflow-prod
+  name: api-gateway-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list"]
+- apiGroups: ["extensions"]
+  resources: ["ingresses"]
+  verbs: ["get", "list"]
+---
+# Monitoring role for metrics collection
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "nodes/proxy", "nodes/metrics", "services", "endpoints", "pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+  verbs: ["get"]
+---
+# Role bindings for microservices
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: user-service-binding
+  namespace: intelliflow-prod
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: user-service
+  namespace: intelliflow-prod
+roleRef:
+  kind: Role
+  name: microservice-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: transaction-service-binding
+  namespace: intelliflow-prod
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: transaction-service
+  namespace: intelliflow-prod
+roleRef:
+  kind: Role
+  name: microservice-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fraud-detection-binding
+  namespace: intelliflow-prod
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: fraud-detection-service
+  namespace: intelliflow-prod
+roleRef:
+  kind: Role
+  name: ml-service-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: analytics-service-binding
+  namespace: intelliflow-prod
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: analytics-service
+  namespace: intelliflow-prod
+roleRef:
+  kind: Role
+  name: microservice-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: api-gateway-binding
+  namespace: intelliflow-prod
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: api-gateway
+  namespace: intelliflow-prod
+roleRef:
+  kind: Role
+  name: api-gateway-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ai-orchestrator-binding
+  namespace: intelliflow-prod
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: ai-orchestrator
+  namespace: intelliflow-prod
+roleRef:
+  kind: Role
+  name: ml-service-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Prometheus cluster role binding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-binding
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: intelliflow-monitoring
+roleRef:
+  kind: ClusterRole
+  name: prometheus-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# User roles for application access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: intelliflow-prod
+  name: readonly-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: intelliflow-prod
+  name: developer-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["pods/log", "pods/exec"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "create", "update", "patch"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: admin-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+# Security role for security team
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: security-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods", "services", "secrets", "configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "daemonsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies", "ingresses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["policy"]
+  resources: ["podsecuritypolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["security.istio.io"]
+  resources: ["*"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+# Service Account for CI/CD
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-deployer
+  namespace: intelliflow-prod
+  labels:
+    app: jenkins
+    component: serviceaccount
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: intelliflow-prod
+  name: deployment-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets", "services", "persistentvolumeclaims"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-deployer-binding
+  namespace: intelliflow-prod
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: jenkins-deployer
+  namespace: intelliflow-prod
+roleRef:
+  kind: Role
+  name: deployment-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Network Security Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: network-security
+  namespace: intelliflow-security
+  labels:
+    app: network-security
+    component: serviceaccount
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: network-security-role
+  labels:
+    component: rbac
+rules:
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods", "services", "namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: network-security-binding
+  labels:
+    component: rbac
+subjects:
+- kind: ServiceAccount
+  name: network-security
+  namespace: intelliflow-security
+roleRef:
+  kind: ClusterRole
+  name: network-security-role
+  apiGroup: rbac.authorization.k8s.io

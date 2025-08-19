@@ -1,0 +1,55 @@
+# General
+.DS_Store
+.env
+*.env
+*.log
+logs/
+**/logs/
+
+# Node / React
+web-ui/node_modules/
+web-ui/.next/
+web-ui/.nuxt/
+web-ui/dist/
+web-ui/build/
+web-ui/.cache/
+
+# Java / Maven
+**/target/
+**/.classpath
+**/.project
+**/.settings/
+
+# Python
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ipynb_checkpoints/
+**/.venv/
+**/venv/
+**/.coverage
+**/htmlcov/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+
+# Docker
+**/.docker-cache/
+
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.*
+
+# Helm
+**/charts/*.tgz
+
+# ML/Artifacts
+**/mlruns/
+**/artifacts/
+**/models/
+
+

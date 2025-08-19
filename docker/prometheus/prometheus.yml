@@ -1,0 +1,56 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # User Service
+  - job_name: 'user-service'
+    metrics_path: '/api/v1/actuator/prometheus'
+    static_configs:
+      - targets: ['user-service:8081']
+
+  # Transaction Service
+  - job_name: 'transaction-service'
+    metrics_path: '/api/v1/actuator/prometheus'
+    static_configs:
+      - targets: ['transaction-service:8082']
+
+  # Fraud Detection Service
+  - job_name: 'fraud-detection-service'
+    metrics_path: '/api/v1/actuator/prometheus'
+    static_configs:
+      - targets: ['fraud-detection-service:8083']
+
+  # Analytics Service
+  - job_name: 'analytics-service'
+    metrics_path: '/api/v1/actuator/prometheus'
+    static_configs:
+      - targets: ['analytics-service:8084']
+
+  # Notification Service
+  - job_name: 'notification-service'
+    metrics_path: '/api/v1/actuator/prometheus'
+    static_configs:
+      - targets: ['notification-service:8085']
+
+  # Infrastructure monitoring
+  - job_name: 'postgres-exporter'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  - job_name: 'redis-exporter'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+
+  - job_name: 'kafka-exporter'
+    static_configs:
+      - targets: ['kafka-exporter:9308']

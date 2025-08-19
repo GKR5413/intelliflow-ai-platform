@@ -1,0 +1,490 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: intelliflow-monitoring
+  labels:
+    app: prometheus
+    component: config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      scrape_timeout: 10s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: intelliflow-production
+        environment: production
+
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+          scheme: http
+          timeout: 10s
+          api_version: v2
+
+    scrape_configs:
+      # Prometheus itself
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+        scrape_interval: 30s
+        metrics_path: /metrics
+
+      # Kubernetes API Server
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - default
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: default;kubernetes;https
+
+      # Kubernetes Nodes
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+          - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics
+
+      # Kubernetes Pods
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - intelliflow-prod
+                - intelliflow-staging
+                - intelliflow-dev
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: kubernetes_pod_name
+
+      # User Service
+      - job_name: 'user-service'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - intelliflow-prod
+                - intelliflow-staging
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: user-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: actuator
+        metrics_path: /actuator/prometheus
+        scrape_interval: 30s
+
+      # Transaction Service
+      - job_name: 'transaction-service'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - intelliflow-prod
+                - intelliflow-staging
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: transaction-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: actuator
+        metrics_path: /actuator/prometheus
+        scrape_interval: 15s
+
+      # Fraud Detection Service
+      - job_name: 'fraud-detection-service'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - intelliflow-prod
+                - intelliflow-staging
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: fraud-detection-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+        metrics_path: /metrics
+        scrape_interval: 15s
+
+      # Analytics Service
+      - job_name: 'analytics-service'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - intelliflow-prod
+                - intelliflow-staging
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: analytics-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: actuator
+        metrics_path: /actuator/prometheus
+        scrape_interval: 30s
+
+      # API Gateway
+      - job_name: 'api-gateway'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - intelliflow-prod
+                - intelliflow-staging
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: api-gateway
+        metrics_path: /actuator/prometheus
+        scrape_interval: 15s
+
+      # AI Orchestrator
+      - job_name: 'ai-orchestrator'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - intelliflow-prod
+                - intelliflow-staging
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: ai-orchestrator-service
+        metrics_path: /metrics
+        scrape_interval: 30s
+
+      # Node Exporter
+      - job_name: 'node-exporter'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - intelliflow-monitoring
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: node-exporter
+        scrape_interval: 30s
+
+      # kube-state-metrics
+      - job_name: 'kube-state-metrics'
+        static_configs:
+          - targets: ['kube-state-metrics:8080']
+        scrape_interval: 30s
+
+      # cAdvisor
+      - job_name: 'kubernetes-cadvisor'
+        kubernetes_sd_configs:
+          - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+        scrape_interval: 30s
+
+      # PostgreSQL Exporter
+      - job_name: 'postgres-exporter'
+        static_configs:
+          - targets: ['postgres-exporter:9187']
+        scrape_interval: 30s
+
+      # Redis Exporter
+      - job_name: 'redis-exporter'
+        static_configs:
+          - targets: ['redis-exporter:9121']
+        scrape_interval: 30s
+
+      # Kafka Exporter
+      - job_name: 'kafka-exporter'
+        static_configs:
+          - targets: ['kafka-exporter:9308']
+        scrape_interval: 30s
+
+      # NGINX Ingress Controller
+      - job_name: 'nginx-ingress'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - ingress-nginx
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            action: keep
+            regex: ingress-nginx
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: "10254"
+        metrics_path: /metrics
+        scrape_interval: 30s
+
+      # Elasticsearch Exporter
+      - job_name: 'elasticsearch-exporter'
+        static_configs:
+          - targets: ['elasticsearch-exporter:9114']
+        scrape_interval: 60s
+
+      # MLflow
+      - job_name: 'mlflow'
+        static_configs:
+          - targets: ['mlflow-service:5000']
+        metrics_path: /metrics
+        scrape_interval: 60s
+
+      # Custom Business Metrics
+      - job_name: 'business-metrics'
+        static_configs:
+          - targets: ['business-metrics-exporter:8080']
+        scrape_interval: 60s
+
+      # Blackbox Exporter for endpoint monitoring
+      - job_name: 'blackbox'
+        metrics_path: /probe
+        params:
+          module: [http_2xx]
+        static_configs:
+          - targets:
+            - https://api.intelliflow.com/health
+            - https://app.intelliflow.com
+            - https://admin.intelliflow.com
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+          - source_labels: [__param_target]
+            target_label: instance
+          - target_label: __address__
+            replacement: blackbox-exporter:9115
+
+  alerts.yml: |
+    groups:
+      - name: intelliflow.rules
+        rules:
+          # High-level service availability
+          - alert: ServiceDown
+            expr: up{job=~"user-service|transaction-service|fraud-detection-service|api-gateway"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              team: platform
+            annotations:
+              summary: "Service {{ $labels.job }} is down"
+              description: "Service {{ $labels.job }} has been down for more than 1 minute."
+
+          # High CPU usage
+          - alert: HighCPUUsage
+            expr: (100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)) > 80
+            for: 5m
+            labels:
+              severity: warning
+              team: infrastructure
+            annotations:
+              summary: "High CPU usage on {{ $labels.instance }}"
+              description: "CPU usage is above 80% for more than 5 minutes on {{ $labels.instance }}."
+
+          # High memory usage
+          - alert: HighMemoryUsage
+            expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+            for: 5m
+            labels:
+              severity: warning
+              team: infrastructure
+            annotations:
+              summary: "High memory usage on {{ $labels.instance }}"
+              description: "Memory usage is above 85% for more than 5 minutes on {{ $labels.instance }}."
+
+          # High disk usage
+          - alert: HighDiskUsage
+            expr: (1 - (node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes{fstype!="tmpfs"})) * 100 > 85
+            for: 5m
+            labels:
+              severity: warning
+              team: infrastructure
+            annotations:
+              summary: "High disk usage on {{ $labels.instance }}"
+              description: "Disk usage is above 85% on filesystem {{ $labels.mountpoint }} on {{ $labels.instance }}."
+
+          # Pod restart alerts
+          - alert: PodCrashLooping
+            expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+            for: 5m
+            labels:
+              severity: warning
+              team: platform
+            annotations:
+              summary: "Pod {{ $labels.pod }} is crash looping"
+              description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is restarting frequently."
+
+          # High error rate
+          - alert: HighErrorRate
+            expr: (rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m])) * 100 > 5
+            for: 5m
+            labels:
+              severity: critical
+              team: platform
+            annotations:
+              summary: "High error rate on {{ $labels.service }}"
+              description: "Error rate is above 5% for more than 5 minutes on {{ $labels.service }}."
+
+          # High response time
+          - alert: HighResponseTime
+            expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+            for: 5m
+            labels:
+              severity: warning
+              team: platform
+            annotations:
+              summary: "High response time on {{ $labels.service }}"
+              description: "95th percentile response time is above 1 second for {{ $labels.service }}."
+
+          # Fraud detection specific alerts
+          - alert: FraudDetectionHighLatency
+            expr: histogram_quantile(0.99, rate(fraud_prediction_duration_seconds_bucket[5m])) > 0.1
+            for: 3m
+            labels:
+              severity: critical
+              team: ml
+            annotations:
+              summary: "Fraud detection service high latency"
+              description: "99th percentile fraud detection latency is above 100ms for more than 3 minutes."
+
+          - alert: ModelAccuracyDrop
+            expr: model_accuracy_score < 0.85
+            for: 10m
+            labels:
+              severity: critical
+              team: ml
+            annotations:
+              summary: "Model accuracy dropped"
+              description: "Model accuracy has dropped below 85% for {{ $labels.model_name }}."
+
+          # Database alerts
+          - alert: PostgreSQLDown
+            expr: pg_up == 0
+            for: 1m
+            labels:
+              severity: critical
+              team: infrastructure
+            annotations:
+              summary: "PostgreSQL database is down"
+              description: "PostgreSQL database has been down for more than 1 minute."
+
+          - alert: HighDatabaseConnections
+            expr: (pg_stat_activity_count / pg_settings_max_connections) * 100 > 80
+            for: 5m
+            labels:
+              severity: warning
+              team: infrastructure
+            annotations:
+              summary: "High database connection usage"
+              description: "Database connection usage is above 80% for more than 5 minutes."
+
+          # Redis alerts
+          - alert: RedisDown
+            expr: redis_up == 0
+            for: 1m
+            labels:
+              severity: critical
+              team: infrastructure
+            annotations:
+              summary: "Redis is down"
+              description: "Redis has been down for more than 1 minute."
+
+          - alert: HighRedisMemoryUsage
+            expr: (redis_memory_used_bytes / redis_memory_max_bytes) * 100 > 90
+            for: 5m
+            labels:
+              severity: warning
+              team: infrastructure
+            annotations:
+              summary: "High Redis memory usage"
+              description: "Redis memory usage is above 90% for more than 5 minutes."
+
+          # Kafka alerts
+          - alert: KafkaDown
+            expr: kafka_server_brokertopicmetrics_messages_in_total == 0
+            for: 5m
+            labels:
+              severity: critical
+              team: infrastructure
+            annotations:
+              summary: "Kafka broker appears to be down"
+              description: "No messages received by Kafka broker for more than 5 minutes."
+
+          # Custom business metrics
+          - alert: HighTransactionVolume
+            expr: rate(transaction_processing_total[1m]) > 1000
+            for: 5m
+            labels:
+              severity: info
+              team: business
+            annotations:
+              summary: "High transaction volume"
+              description: "Transaction processing rate is above 1000 TPS for more than 5 minutes."
+
+          - alert: FraudDetectionRate
+            expr: (rate(fraud_detected_total[5m]) / rate(transaction_processing_total[5m])) * 100 > 10
+            for: 10m
+            labels:
+              severity: warning
+              team: fraud
+            annotations:
+              summary: "High fraud detection rate"
+              description: "Fraud detection rate is above 10% for more than 10 minutes."

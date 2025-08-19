@@ -1,0 +1,299 @@
+{{- if .Values.services.userService.enabled }}
+{{- $service := .Values.services.userService }}
+{{- $serviceName := $service.name }}
+{{- $component := "microservice" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" $component "imageTag" $service.image.tag) | nindent 4 }}
+  {{- with .Values.security.serviceAccounts.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $serviceName }}-config
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" "config" "imageTag" $service.image.tag) | nindent 4 }}
+data:
+  application.yml: |
+    server:
+      port: 8080
+      servlet:
+        context-path: /api/v1
+    
+    spring:
+      application:
+        name: {{ $serviceName }}
+      
+      datasource:
+        url: jdbc:postgresql://{{ .Release.Name }}-postgresql:5432/intelliflow_users
+        username: ${DB_USERNAME}
+        password: ${DB_PASSWORD}
+        driver-class-name: org.postgresql.Driver
+        hikari:
+          maximum-pool-size: 20
+          minimum-idle: 5
+          connection-timeout: 30000
+          idle-timeout: 600000
+          max-lifetime: 1800000
+      
+      jpa:
+        hibernate:
+          ddl-auto: validate
+        show-sql: false
+        properties:
+          hibernate:
+            dialect: org.hibernate.dialect.PostgreSQLDialect
+      
+      redis:
+        host: {{ .Release.Name }}-redis-master
+        port: 6379
+        password: ${REDIS_PASSWORD}
+        database: 0
+        timeout: 2000ms
+        lettuce:
+          pool:
+            max-active: 20
+            max-idle: 10
+            min-idle: 5
+      
+      kafka:
+        bootstrap-servers: {{ .Release.Name }}-kafka:9092
+        producer:
+          key-serializer: org.apache.kafka.common.serialization.StringSerializer
+          value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+          acks: all
+          retries: 3
+        consumer:
+          group-id: user-service-group
+          auto-offset-reset: earliest
+          key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+          value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+    
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info,metrics,prometheus
+          base-path: /actuator
+      endpoint:
+        health:
+          show-details: always
+        metrics:
+          enabled: true
+        prometheus:
+          enabled: true
+      metrics:
+        export:
+          prometheus:
+            enabled: true
+    
+    logging:
+      level:
+        com.intelliflow: INFO
+      pattern:
+        console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level [%X{correlationId}] %logger{36} - %msg%n"
+    
+    jwt:
+      secret: ${JWT_SECRET}
+      expiration: 86400000
+      refresh-expiration: 604800000
+    
+    app:
+      cors:
+        allowed-origins: {{ $service.config.cors.allowedOrigins | quote }}
+        allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+        allowed-headers: "*"
+        allow-credentials: true
+      
+      rate-limiting:
+        enabled: {{ $service.config.rateLimiting.enabled }}
+        requests-per-minute: {{ $service.config.rateLimiting.requestsPerMinute }}
+      
+      security:
+        password-strength:
+          min-length: {{ $service.config.security.passwordStrength.minLength }}
+          require-uppercase: {{ $service.config.security.passwordStrength.requireUppercase }}
+          require-lowercase: {{ $service.config.security.passwordStrength.requireLowercase }}
+          require-numbers: {{ $service.config.security.passwordStrength.requireNumbers }}
+          require-special-chars: {{ $service.config.security.passwordStrength.requireSpecialChars }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" $component "imageTag" $service.image.tag) | nindent 4 }}
+spec:
+  replicas: {{ $service.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "intelliflow-platform.serviceSelectorLabels" (dict "serviceName" $serviceName "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" $component "imageTag" $service.image.tag) | nindent 8 }}
+      annotations:
+        {{- include "intelliflow-platform.serviceAnnotations" (dict "Values" .Values "servicePort" $service.service.actuatorPort) | nindent 8 }}
+        {{- include "intelliflow-platform.istioAnnotations" . | nindent 8 }}
+        checksum/config: {{ include (print $.Template.BasePath "/user-service.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "intelliflow-platform.serviceAccountNameForService" (dict "Values" .Values "serviceName" $serviceName) }}
+      {{- include "intelliflow-platform.podSecurityContext" . | nindent 6 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: {{ $serviceName }}
+        image: {{ include "intelliflow-platform.image" (dict "Values" .Values "imageRepository" $service.image.repository "imageTag" $service.image.tag) }}
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ $service.service.targetPort }}
+          protocol: TCP
+        - name: actuator
+          containerPort: {{ $service.service.actuatorPort }}
+          protocol: TCP
+        env:
+        {{- include "intelliflow-platform.commonEnvVars" (dict "config" $service.config "Values" .Values) | nindent 8 }}
+        {{- include "intelliflow-platform.databaseEnvVars" . | nindent 8 }}
+        {{- include "intelliflow-platform.redisEnvVars" . | nindent 8 }}
+        {{- include "intelliflow-platform.kafkaEnvVars" . | nindent 8 }}
+        {{- include "intelliflow-platform.jwtEnvVars" . | nindent 8 }}
+        {{- include "intelliflow-platform.monitoringEnvVars" . | nindent 8 }}
+        volumeMounts:
+        {{- include "intelliflow-platform.volumeMounts" (dict "serviceName" $serviceName) | nindent 8 }}
+        {{- include "intelliflow-platform.securityContext" . | nindent 8 }}
+        {{- include "intelliflow-platform.resources" $service | nindent 8 }}
+        livenessProbe:
+          {{- toYaml $service.healthCheck.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml $service.healthCheck.readinessProbe | nindent 10 }}
+        startupProbe:
+          httpGet:
+            path: /actuator/health
+            port: {{ $service.service.targetPort }}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      volumes:
+      {{- include "intelliflow-platform.volumes" (dict "serviceName" $serviceName) | nindent 6 }}
+      {{- include "intelliflow-platform.nodeSelector" $service | nindent 6 }}
+      {{- include "intelliflow-platform.affinity" (dict "serviceName" $serviceName "affinity" $service.affinity) | nindent 6 }}
+      {{- include "intelliflow-platform.tolerations" $service | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" $component "imageTag" $service.image.tag) | nindent 4 }}
+  {{- with $service.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $service.service.type }}
+  ports:
+  - name: http
+    port: {{ $service.service.port }}
+    targetPort: {{ $service.service.targetPort }}
+    protocol: TCP
+  - name: actuator
+    port: {{ $service.service.actuatorPort }}
+    targetPort: {{ $service.service.actuatorPort }}
+    protocol: TCP
+  selector:
+    {{- include "intelliflow-platform.serviceSelectorLabels" (dict "serviceName" $serviceName "Release" .Release) | nindent 4 }}
+{{- if $service.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $serviceName }}-hpa
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" "autoscaler" "imageTag" $service.image.tag) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $serviceName }}
+  minReplicas: {{ $service.autoscaling.minReplicas }}
+  maxReplicas: {{ $service.autoscaling.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ $service.autoscaling.targetCPUUtilizationPercentage }}
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: {{ $service.autoscaling.targetMemoryUtilizationPercentage }}
+  {{- if $service.autoscaling.customMetrics }}
+  {{- range $service.autoscaling.customMetrics }}
+  - {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+      selectPolicy: Min
+{{- end }}
+{{- if .Values.global.monitoring.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ include "intelliflow-platform.namespace" . }}
+  labels:
+    {{- include "intelliflow-platform.serviceLabels" (dict "Values" .Values "serviceName" $serviceName "component" "monitoring" "imageTag" $service.image.tag) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "intelliflow-platform.serviceSelectorLabels" (dict "serviceName" $serviceName "Release" .Release) | nindent 6 }}
+  endpoints:
+  - port: actuator
+    path: {{ .Values.global.monitoring.prometheus.path }}
+    interval: 30s
+    scrapeTimeout: 10s
+{{- end }}
+{{- end }}

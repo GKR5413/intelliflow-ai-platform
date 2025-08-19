@@ -1,0 +1,716 @@
+# Global configuration
+global:
+  imageRegistry: intelliflow-registry.com
+  imageTag: "1.0.0"
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: intelliflow-registry-secret
+  
+  # Environment configuration
+  environment: production
+  namespace: intelliflow-prod
+  
+  # Common labels
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: intelliflow-platform
+    app.kubernetes.io/version: "1.0.0"
+  
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  
+  # Resource defaults
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+  
+  # Storage
+  storageClass: fast-ssd
+  
+  # Monitoring
+  monitoring:
+    enabled: true
+    prometheus:
+      enabled: true
+      path: /actuator/prometheus
+    
+  # Service mesh (Istio)
+  serviceMesh:
+    enabled: false
+    mtls: STRICT
+
+# Service configuration
+services:
+  userService:
+    enabled: true
+    name: user-service
+    replicaCount: 3
+    image:
+      repository: user-service
+      tag: ""  # Uses global.imageTag if empty
+    
+    service:
+      type: ClusterIP
+      port: 8080
+      targetPort: 8080
+      actuatorPort: 8081
+    
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "1000m"
+    
+    autoscaling:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+    
+    healthCheck:
+      livenessProbe:
+        httpGet:
+          path: /actuator/health/liveness
+          port: 8080
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+    
+    config:
+      springProfiles: production
+      javaOpts: "-Xmx1g -Xms512m -XX:+UseG1GC"
+      cors:
+        allowedOrigins: "https://app.intelliflow.com,https://admin.intelliflow.com"
+      rateLimiting:
+        enabled: true
+        requestsPerMinute: 100
+      security:
+        passwordStrength:
+          minLength: 8
+          requireUppercase: true
+          requireNumbers: true
+          requireSpecialChars: true
+
+  transactionService:
+    enabled: true
+    name: transaction-service
+    replicaCount: 5
+    image:
+      repository: transaction-service
+      tag: ""
+    
+    service:
+      type: ClusterIP
+      port: 8080
+      targetPort: 8080
+      actuatorPort: 8081
+    
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "2000m"
+    
+    autoscaling:
+      enabled: true
+      minReplicas: 5
+      maxReplicas: 50
+      targetCPUUtilizationPercentage: 60
+      targetMemoryUtilizationPercentage: 75
+      customMetrics:
+        - type: Pods
+          metric:
+            name: transaction_processing_rate
+          target:
+            type: AverageValue
+            averageValue: "200"
+    
+    healthCheck:
+      livenessProbe:
+        httpGet:
+          path: /actuator/health/liveness
+          port: 8080
+        initialDelaySeconds: 90
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /actuator/health/readiness
+          port: 8080
+        initialDelaySeconds: 45
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+    
+    config:
+      springProfiles: production
+      javaOpts: "-Xmx2g -Xms1g -XX:+UseG1GC -XX:MaxGCPauseMillis=100"
+      stateMachine:
+        enabled: true
+        timeoutSeconds: 300
+      fraud:
+        checkEnabled: true
+        timeoutMs: 5000
+
+  fraudDetectionService:
+    enabled: true
+    name: fraud-detection-service
+    replicaCount: 4
+    image:
+      repository: fraud-detection-service
+      tag: ""
+    
+    service:
+      type: ClusterIP
+      port: 8000
+      targetPort: 8000
+      grpcPort: 9000
+      monitorPort: 8001
+    
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "1000m"
+        nvidia.com/gpu: "0"
+      limits:
+        memory: "4Gi"
+        cpu: "4000m"
+        nvidia.com/gpu: "1"
+    
+    autoscaling:
+      enabled: true
+      minReplicas: 4
+      maxReplicas: 25
+      targetCPUUtilizationPercentage: 65
+      targetMemoryUtilizationPercentage: 70
+      customMetrics:
+        - type: Pods
+          metric:
+            name: fraud_predictions_per_second
+          target:
+            type: AverageValue
+            averageValue: "500"
+    
+    healthCheck:
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /health/ready
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 3
+    
+    config:
+      pythonEnv:
+        workers: 4
+        maxRequests: 1000
+        maxRequestsJitter: 100
+        logLevel: INFO
+      model:
+        cachingStrategy: "adaptive"
+        batchSize: 32
+        timeoutMs: 50
+      gpu:
+        enabled: true
+        memoryFraction: 0.8
+    
+    initContainer:
+      enabled: true
+      image:
+        repository: model-downloader
+        tag: "1.0.0"
+      storage:
+        size: 10Gi
+
+  analyticsService:
+    enabled: true
+    name: analytics-service
+    replicaCount: 2
+    image:
+      repository: analytics-service
+      tag: ""
+    
+    service:
+      type: ClusterIP
+      port: 8080
+      targetPort: 8080
+      actuatorPort: 8081
+    
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "1500m"
+    
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 85
+    
+    config:
+      springProfiles: production
+      javaOpts: "-Xmx2g -Xms1g -XX:+UseG1GC"
+      dataRetention:
+        days: 90
+      aggregation:
+        batchSize: 1000
+        intervalMinutes: 5
+
+  notificationService:
+    enabled: true
+    name: notification-service
+    replicaCount: 2
+    image:
+      repository: notification-service
+      tag: ""
+    
+    service:
+      type: ClusterIP
+      port: 8080
+      targetPort: 8080
+      actuatorPort: 8081
+    
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "150m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+    
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 70
+    
+    config:
+      springProfiles: production
+      javaOpts: "-Xmx512m -Xms256m -XX:+UseG1GC"
+      email:
+        templatesPath: "/app/templates"
+        retryAttempts: 3
+      sms:
+        enabled: false
+      push:
+        enabled: true
+
+  apiGateway:
+    enabled: true
+    name: api-gateway
+    replicaCount: 3
+    image:
+      repository: api-gateway
+      tag: ""
+    
+    service:
+      type: LoadBalancer
+      port: 80
+      targetPort: 8080
+      httpsPort: 443
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: nlb
+        service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "arn:aws:acm:us-west-2:123456789012:certificate/12345678-1234-1234-1234-123456789012"
+    
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "1000m"
+    
+    autoscaling:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 15
+      targetCPUUtilizationPercentage: 70
+      customMetrics:
+        - type: Pods
+          metric:
+            name: gateway_requests_per_second
+          target:
+            type: AverageValue
+            averageValue: "1000"
+    
+    config:
+      springProfiles: production
+      javaOpts: "-Xmx1g -Xms512m -XX:+UseG1GC"
+      rateLimiting:
+        enabled: true
+        defaultLimit: 1000
+        burstCapacity: 2000
+      circuitBreaker:
+        enabled: true
+        failureThreshold: 50
+        timeoutDuration: 60s
+      cors:
+        enabled: true
+        allowedOrigins: "*"
+        allowedMethods: "GET,POST,PUT,DELETE,OPTIONS"
+
+  aiOrchestrator:
+    enabled: true
+    name: ai-orchestrator
+    replicaCount: 2
+    image:
+      repository: ai-orchestrator
+      tag: ""
+    
+    service:
+      type: ClusterIP
+      port: 8080
+      targetPort: 8080
+      monitoringPort: 8081
+    
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "1500m"
+    
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 70
+    
+    config:
+      pythonEnv:
+        workers: 2
+        logLevel: INFO
+      mlflow:
+        trackingUri: "http://mlflow-service:5000"
+      kubernetes:
+        jobNamespace: intelliflow-prod
+        resourceQuota:
+          cpu: "2000m"
+          memory: "4Gi"
+
+# Infrastructure dependencies
+postgresql:
+  enabled: true
+  global:
+    postgresql:
+      auth:
+        existingSecret: database-secrets
+        secretKeys:
+          adminPasswordKey: POSTGRES_PASSWORD
+          userPasswordKey: DB_PASSWORD
+  primary:
+    persistence:
+      enabled: true
+      size: 100Gi
+      storageClass: fast-ssd
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "1000m"
+      limits:
+        memory: "4Gi"
+        cpu: "2000m"
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+redis:
+  enabled: true
+  global:
+    redis:
+      auth:
+        existingSecret: redis-secrets
+        existingSecretPasswordKey: REDIS_PASSWORD
+  master:
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClass: fast-ssd
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+kafka:
+  enabled: true
+  replicaCount: 3
+  persistence:
+    enabled: true
+    size: 100Gi
+    storageClass: fast-ssd
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+  metrics:
+    kafka:
+      enabled: true
+    jmx:
+      enabled: true
+
+mongodb:
+  enabled: true
+  replicaCount: 3
+  persistence:
+    enabled: true
+    size: 100Gi
+    storageClass: fast-ssd
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+  metrics:
+    enabled: true
+
+# Monitoring and observability
+monitoring:
+  prometheus:
+    enabled: true
+    server:
+      persistentVolume:
+        enabled: true
+        size: 50Gi
+        storageClass: fast-ssd
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1000m"
+        limits:
+          memory: "4Gi"
+          cpu: "2000m"
+      retention: "30d"
+    
+    alertmanager:
+      enabled: true
+      persistentVolume:
+        enabled: true
+        size: 10Gi
+      config:
+        global:
+          smtp_smarthost: 'smtp.gmail.com:587'
+          smtp_from: 'alerts@intelliflow.com'
+        route:
+          group_by: ['alertname']
+          group_wait: 10s
+          group_interval: 10s
+          repeat_interval: 1h
+          receiver: 'web.hook'
+        receivers:
+        - name: 'web.hook'
+          email_configs:
+          - to: 'team@intelliflow.com'
+            subject: 'IntelliFlow Alert: {{ .GroupLabels.alertname }}'
+  
+  grafana:
+    enabled: true
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: fast-ssd
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "150m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+    dashboardProviders:
+      dashboardproviders.yaml:
+        apiVersion: 1
+        providers:
+        - name: 'intelliflow'
+          orgId: 1
+          folder: 'IntelliFlow'
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/intelliflow
+
+# Security
+security:
+  networkPolicies:
+    enabled: true
+  
+  podSecurityPolicy:
+    enabled: true
+  
+  serviceAccounts:
+    create: true
+    annotations: {}
+  
+  vault:
+    enabled: false
+    address: "https://vault.intelliflow-security.svc.cluster.local:8200"
+    role: "intelliflow-role"
+    
+  tls:
+    enabled: true
+    secretName: intelliflow-tls-secret
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  
+  hosts:
+    - host: api.intelliflow.com
+      paths:
+        - path: /api/v1/users
+          pathType: Prefix
+          service: user-service
+          port: 8080
+        - path: /api/v1/transactions
+          pathType: Prefix
+          service: transaction-service
+          port: 8080
+        - path: /api/v1/fraud
+          pathType: Prefix
+          service: fraud-detection-service
+          port: 8000
+        - path: /api/v1/analytics
+          pathType: Prefix
+          service: analytics-service
+          port: 8080
+        - path: /api/v1/notifications
+          pathType: Prefix
+          service: notification-service
+          port: 8080
+        - path: /api/v1/ml-platform
+          pathType: Prefix
+          service: ai-orchestrator
+          port: 8080
+  
+  tls:
+    - secretName: intelliflow-tls-secret
+      hosts:
+        - api.intelliflow.com
+
+# Environment-specific overrides
+environments:
+  development:
+    global:
+      environment: development
+      namespace: intelliflow-dev
+    services:
+      userService:
+        replicaCount: 1
+        autoscaling:
+          minReplicas: 1
+          maxReplicas: 3
+      transactionService:
+        replicaCount: 1
+        autoscaling:
+          minReplicas: 1
+          maxReplicas: 3
+      fraudDetectionService:
+        replicaCount: 1
+        autoscaling:
+          minReplicas: 1
+          maxReplicas: 2
+        resources:
+          requests:
+            nvidia.com/gpu: "0"
+          limits:
+            nvidia.com/gpu: "0"
+    postgresql:
+      primary:
+        persistence:
+          size: 20Gi
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+  
+  staging:
+    global:
+      environment: staging
+      namespace: intelliflow-staging
+    services:
+      userService:
+        replicaCount: 2
+        autoscaling:
+          minReplicas: 2
+          maxReplicas: 5
+      transactionService:
+        replicaCount: 2
+        autoscaling:
+          minReplicas: 2
+          maxReplicas: 10
+      fraudDetectionService:
+        replicaCount: 2
+        autoscaling:
+          minReplicas: 2
+          maxReplicas: 5
+    postgresql:
+      primary:
+        persistence:
+          size: 50Gi
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"

@@ -1,0 +1,579 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: intelliflow-monitoring
+  labels:
+    app: alertmanager
+    component: config
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'smtp.gmail.com:587'
+      smtp_from: 'alerts@intelliflow.com'
+      smtp_auth_username: 'alerts@intelliflow.com'
+      smtp_auth_password: '${SMTP_PASSWORD}'
+      slack_api_url: '${SLACK_WEBHOOK_URL}'
+      pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+    
+    templates:
+      - '/etc/alertmanager/templates/*.tmpl'
+    
+    route:
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 24h
+      receiver: 'default-receiver'
+      routes:
+      # Critical alerts - immediate notification
+      - match:
+          severity: critical
+        receiver: 'critical-alerts'
+        group_wait: 10s
+        group_interval: 2m
+        repeat_interval: 4h
+        routes:
+        - match:
+            alertname: 'ServiceDown'
+          receiver: 'service-down-alerts'
+          group_wait: 5s
+          repeat_interval: 1h
+        - match:
+            alertname: 'HighErrorRate'
+          receiver: 'error-rate-alerts'
+          group_wait: 10s
+          repeat_interval: 2h
+        - match:
+            alertname: 'ModelAccuracyDrop'
+          receiver: 'ml-alerts'
+          group_wait: 15s
+          repeat_interval: 6h
+      
+      # High priority alerts
+      - match:
+          severity: high
+        receiver: 'high-priority-alerts'
+        group_wait: 15s
+        group_interval: 5m
+        repeat_interval: 8h
+        routes:
+        - match:
+            alertname: 'FraudDetectionHighLatency'
+          receiver: 'ml-alerts'
+        - match:
+            alertname: 'HighMemoryUsage'
+          receiver: 'infrastructure-alerts'
+        - match:
+            alertname: 'DatabaseDown'
+          receiver: 'database-alerts'
+      
+      # Warning alerts
+      - match:
+          severity: warning
+        receiver: 'warning-alerts'
+        group_wait: 5m
+        group_interval: 15m
+        repeat_interval: 24h
+      
+      # Business alerts
+      - match:
+          team: business
+        receiver: 'business-alerts'
+        group_wait: 2m
+        group_interval: 10m
+        repeat_interval: 12h
+      
+      # Security alerts
+      - match_re:
+          alertname: '.*(Security|Auth|Fraud).*'
+        receiver: 'security-alerts'
+        group_wait: 30s
+        group_interval: 3m
+        repeat_interval: 6h
+      
+      # Infrastructure alerts
+      - match:
+          team: infrastructure
+        receiver: 'infrastructure-alerts'
+        group_wait: 3m
+        group_interval: 10m
+        repeat_interval: 12h
+      
+      # ML/AI alerts
+      - match:
+          team: ml
+        receiver: 'ml-alerts'
+        group_wait: 1m
+        group_interval: 5m
+        repeat_interval: 8h
+    
+    inhibit_rules:
+    # Inhibit any alert that has a less severe severity than a critical alert
+    - source_match:
+        severity: 'critical'
+      target_match:
+        severity: 'warning'
+      equal: ['alertname', 'cluster', 'service']
+    
+    # Inhibit ServiceDown alerts if HighErrorRate is firing
+    - source_match:
+        alertname: 'ServiceDown'
+      target_match:
+        alertname: 'HighErrorRate'
+      equal: ['service']
+    
+    # Inhibit individual service alerts if entire cluster is down
+    - source_match:
+        alertname: 'ClusterDown'
+      target_match_re:
+        alertname: '(ServiceDown|DatabaseDown|HighErrorRate)'
+      equal: ['cluster']
+    
+    receivers:
+    - name: 'default-receiver'
+      email_configs:
+      - to: 'platform-team@intelliflow.com'
+        subject: '[IntelliFlow] {{ .GroupLabels.alertname }} Alert'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Severity: {{ .Labels.severity }}
+          Service: {{ .Labels.service | default "Unknown" }}
+          Environment: {{ .Labels.environment | default "Unknown" }}
+          Started: {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          {{ if .GeneratorURL }}Dashboard: {{ .GeneratorURL }}{{ end }}
+          {{ end }}
+        headers:
+          Subject: '[IntelliFlow] {{ .GroupLabels.alertname }} - {{ .Status | title }}'
+    
+    - name: 'critical-alerts'
+      email_configs:
+      - to: 'oncall@intelliflow.com,platform-team@intelliflow.com,leadership@intelliflow.com'
+        subject: '🚨 CRITICAL: {{ .GroupLabels.alertname }}'
+        body: |
+          🚨 CRITICAL ALERT 🚨
+          
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Service: {{ .Labels.service | default "Unknown" }}
+          Environment: {{ .Labels.environment | default "Production" }}
+          Started: {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          
+          📊 Grafana Dashboard: https://grafana.intelliflow.com/d/platform-overview
+          🔍 Logs: https://kibana.intelliflow.com
+          {{ if .GeneratorURL }}📈 Prometheus: {{ .GeneratorURL }}{{ end }}
+          {{ end }}
+          
+          Immediate action required!
+        headers:
+          Priority: 'urgent'
+          X-Priority: '1'
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#critical-alerts'
+        color: 'danger'
+        title: '🚨 CRITICAL: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Service:* {{ .Labels.service | default "Unknown" }}
+          *Environment:* {{ .Labels.environment | default "Production" }}
+          *Started:* {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          
+          <https://grafana.intelliflow.com/d/platform-overview|📊 Dashboard> | <https://kibana.intelliflow.com|🔍 Logs>
+          {{ end }}
+        actions:
+        - type: button
+          text: 'View Dashboard'
+          url: 'https://grafana.intelliflow.com/d/platform-overview'
+        - type: button
+          text: 'Check Logs'
+          url: 'https://kibana.intelliflow.com'
+      
+      pagerduty_configs:
+      - routing_key: '${PAGERDUTY_INTEGRATION_KEY}'
+        description: '{{ .GroupLabels.alertname }}: {{ .Annotations.summary }}'
+        severity: 'critical'
+        details:
+          alert_count: '{{ len .Alerts }}'
+          environment: '{{ .GroupLabels.environment | default "production" }}'
+          service: '{{ .GroupLabels.service | default "unknown" }}'
+          runbook_url: 'https://docs.intelliflow.com/runbooks/{{ .GroupLabels.alertname }}'
+    
+    - name: 'service-down-alerts'
+      email_configs:
+      - to: 'oncall@intelliflow.com,sre@intelliflow.com'
+        subject: '🔴 SERVICE DOWN: {{ .GroupLabels.service }}'
+        body: |
+          🔴 SERVICE DOWN ALERT 🔴
+          
+          Service: {{ .GroupLabels.service }}
+          Environment: {{ .GroupLabels.environment | default "Production" }}
+          
+          {{ range .Alerts }}
+          Description: {{ .Annotations.description }}
+          Started: {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          {{ end }}
+          
+          IMMEDIATE ACTION REQUIRED:
+          1. Check service logs: kubectl logs -l app={{ .GroupLabels.service }} -n intelliflow-prod
+          2. Check pod status: kubectl get pods -l app={{ .GroupLabels.service }} -n intelliflow-prod
+          3. Review recent deployments
+          4. Escalate if not resolved in 10 minutes
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#service-outages'
+        color: 'danger'
+        title: '🔴 SERVICE DOWN: {{ .GroupLabels.service }}'
+        text: |
+          Service {{ .GroupLabels.service }} is DOWN in {{ .GroupLabels.environment | default "production" }}
+          
+          *Immediate Actions:*
+          • Check service health
+          • Review recent changes
+          • Escalate if needed
+        actions:
+        - type: button
+          text: 'Service Logs'
+          url: 'https://kibana.intelliflow.com/app/discover#/?_g=(filters:!(),refreshInterval:(pause:!t,value:0),time:(from:now-1h,to:now))&_a=(columns:!(message),filters:!(('\''$state'\':(store:appState),meta:(alias:!n,disabled:!f,index:'\''logstash-*'\'',key:kubernetes.labels.app,negate:!f,params:(query:{{ .GroupLabels.service }})),query:(match:(kubernetes.labels.app:(query:{{ .GroupLabels.service }},type:phrase))))),index:'\''logstash-*'\'')'
+    
+    - name: 'error-rate-alerts'
+      email_configs:
+      - to: 'platform-team@intelliflow.com,product-team@intelliflow.com'
+        subject: '⚠️ HIGH ERROR RATE: {{ .GroupLabels.service }}'
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#platform-alerts'
+        color: 'warning'
+        title: '⚠️ HIGH ERROR RATE: {{ .GroupLabels.service }}'
+    
+    - name: 'ml-alerts'
+      email_configs:
+      - to: 'ml-team@intelliflow.com,data-science@intelliflow.com'
+        subject: '🤖 ML ALERT: {{ .GroupLabels.alertname }}'
+        body: |
+          🤖 Machine Learning Alert
+          
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Model: {{ .Labels.model_name | default "Unknown" }}
+          Description: {{ .Annotations.description }}
+          Started: {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          {{ end }}
+          
+          MLflow Dashboard: https://mlflow.intelliflow.com
+          Model Monitoring: https://grafana.intelliflow.com/d/ml-monitoring
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#ml-alerts'
+        color: 'warning'
+        title: '🤖 {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Model:* {{ .Labels.model_name | default "Unknown" }}
+          *Issue:* {{ .Annotations.summary }}
+          {{ end }}
+        actions:
+        - type: button
+          text: 'MLflow Dashboard'
+          url: 'https://mlflow.intelliflow.com'
+        - type: button
+          text: 'Model Metrics'
+          url: 'https://grafana.intelliflow.com/d/ml-monitoring'
+    
+    - name: 'high-priority-alerts'
+      email_configs:
+      - to: 'platform-team@intelliflow.com'
+        subject: '🟠 HIGH PRIORITY: {{ .GroupLabels.alertname }}'
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#platform-alerts'
+        color: 'warning'
+        title: '🟠 HIGH PRIORITY: {{ .GroupLabels.alertname }}'
+    
+    - name: 'warning-alerts'
+      email_configs:
+      - to: 'platform-team@intelliflow.com'
+        subject: '🟡 WARNING: {{ .GroupLabels.alertname }}'
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#monitoring'
+        color: 'warning'
+        title: '🟡 {{ .GroupLabels.alertname }}'
+    
+    - name: 'business-alerts'
+      email_configs:
+      - to: 'business-team@intelliflow.com,product-team@intelliflow.com'
+        subject: '📊 BUSINESS ALERT: {{ .GroupLabels.alertname }}'
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#business-metrics'
+        color: 'good'
+        title: '📊 {{ .GroupLabels.alertname }}'
+    
+    - name: 'security-alerts'
+      email_configs:
+      - to: 'security@intelliflow.com,oncall@intelliflow.com'
+        subject: '🔒 SECURITY ALERT: {{ .GroupLabels.alertname }}'
+        body: |
+          🔒 SECURITY ALERT 🔒
+          
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Severity: {{ .Labels.severity }}
+          Started: {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}
+          {{ end }}
+          
+          Security Dashboard: https://grafana.intelliflow.com/d/security-overview
+          Incident Response: https://docs.intelliflow.com/security/incident-response
+        headers:
+          Priority: 'urgent'
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#security-alerts'
+        color: 'danger'
+        title: '🔒 SECURITY: {{ .GroupLabels.alertname }}'
+      
+      # Send to SIEM/Security tools
+      webhook_configs:
+      - url: 'https://siem.intelliflow.com/api/alerts'
+        send_resolved: true
+        http_config:
+          bearer_token: '${SIEM_API_TOKEN}'
+    
+    - name: 'infrastructure-alerts'
+      email_configs:
+      - to: 'sre@intelliflow.com,infrastructure@intelliflow.com'
+        subject: '🏗️ INFRASTRUCTURE: {{ .GroupLabels.alertname }}'
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#infrastructure'
+        color: 'warning'
+        title: '🏗️ {{ .GroupLabels.alertname }}'
+    
+    - name: 'database-alerts'
+      email_configs:
+      - to: 'dba@intelliflow.com,platform-team@intelliflow.com'
+        subject: '🗄️ DATABASE ALERT: {{ .GroupLabels.alertname }}'
+      
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#database-alerts'
+        color: 'danger'
+        title: '🗄️ DATABASE: {{ .GroupLabels.alertname }}'
+        actions:
+        - type: button
+          text: 'Database Dashboard'
+          url: 'https://grafana.intelliflow.com/d/database-overview'
+  
+  alert-templates.tmpl: |
+    {{ define "email.intelliflow.subject" }}
+    [IntelliFlow {{ .Status | title }}] {{ .GroupLabels.alertname }} ({{ len .Alerts }} alerts)
+    {{ end }}
+    
+    {{ define "email.intelliflow.body" }}
+    <h2>🚨 IntelliFlow Alert Notification</h2>
+    
+    <table border="1" cellpadding="5" cellspacing="0">
+      <tr>
+        <th>Alert</th>
+        <th>Service</th>
+        <th>Severity</th>
+        <th>Environment</th>
+        <th>Started</th>
+        <th>Status</th>
+      </tr>
+      {{ range .Alerts }}
+      <tr>
+        <td>{{ .Annotations.summary }}</td>
+        <td>{{ .Labels.service | default "Unknown" }}</td>
+        <td style="color: 
+          {{ if eq .Labels.severity "critical" }}red
+          {{ else if eq .Labels.severity "warning" }}orange
+          {{ else }}black{{ end }};">
+          {{ .Labels.severity | upper }}
+        </td>
+        <td>{{ .Labels.environment | default "Production" }}</td>
+        <td>{{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}</td>
+        <td style="color: {{ if eq .Status "firing" }}red{{ else }}green{{ end }};">
+          {{ .Status | upper }}
+        </td>
+      </tr>
+      {{ end }}
+    </table>
+    
+    <h3>Alert Details</h3>
+    {{ range .Alerts }}
+    <div style="border: 1px solid #ccc; margin: 10px 0; padding: 10px; border-radius: 5px;">
+      <h4>{{ .Annotations.summary }}</h4>
+      <p><strong>Description:</strong> {{ .Annotations.description }}</p>
+      <p><strong>Runbook:</strong> 
+        <a href="https://docs.intelliflow.com/runbooks/{{ .Labels.alertname }}">
+          View Runbook
+        </a>
+      </p>
+      {{ if .GeneratorURL }}
+      <p><strong>Prometheus:</strong> <a href="{{ .GeneratorURL }}">View Query</a></p>
+      {{ end }}
+    </div>
+    {{ end }}
+    
+    <hr>
+    <h3>🔗 Quick Links</h3>
+    <ul>
+      <li><a href="https://grafana.intelliflow.com">📊 Grafana Dashboards</a></li>
+      <li><a href="https://prometheus.intelliflow.com">📈 Prometheus</a></li>
+      <li><a href="https://kibana.intelliflow.com">🔍 Kibana Logs</a></li>
+      <li><a href="https://docs.intelliflow.com/runbooks">📖 Runbooks</a></li>
+    </ul>
+    {{ end }}
+    
+    {{ define "slack.intelliflow.title" }}
+    {{ if eq .Status "firing" }}🔥{{ else }}✅{{ end }} {{ .GroupLabels.alertname }}
+    {{ end }}
+    
+    {{ define "slack.intelliflow.text" }}
+    {{ if eq .Status "firing" }}
+    *FIRING ALERTS* ({{ len .Alerts }})
+    {{ else }}
+    *RESOLVED ALERTS* ({{ len .Alerts }})
+    {{ end }}
+    
+    {{ range .Alerts }}
+    • *{{ .Annotations.summary }}*
+      Service: {{ .Labels.service | default "Unknown" }}
+      Environment: {{ .Labels.environment | default "Production" }}
+      Since: {{ .StartsAt.Format "15:04:05" }}
+    {{ end }}
+    {{ end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-secrets
+  namespace: intelliflow-monitoring
+  labels:
+    app: alertmanager
+    component: secrets
+type: Opaque
+stringData:
+  SMTP_PASSWORD: "YourSMTPPassword"
+  SLACK_WEBHOOK_URL: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+  PAGERDUTY_INTEGRATION_KEY: "your-pagerduty-integration-key"
+  SIEM_API_TOKEN: "your-siem-api-token"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: intelliflow-monitoring
+  labels:
+    app: alertmanager
+    component: alertmanager
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      serviceAccountName: alertmanager
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+      - name: alertmanager
+        image: prom/alertmanager:v0.26.0
+        args:
+        - '--config.file=/etc/alertmanager/alertmanager.yml'
+        - '--storage.path=/alertmanager'
+        - '--data.retention=120h'
+        - '--cluster.listen-address=0.0.0.0:9094'
+        - '--cluster.peer=alertmanager-0.alertmanager:9094'
+        - '--cluster.peer=alertmanager-1.alertmanager:9094'
+        - '--web.external-url=https://alertmanager.intelliflow.com'
+        ports:
+        - name: web
+          containerPort: 9093
+        - name: mesh
+          containerPort: 9094
+        envFrom:
+        - secretRef:
+            name: alertmanager-secrets
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/alertmanager
+        - name: storage-volume
+          mountPath: /alertmanager
+        - name: templates-volume
+          mountPath: /etc/alertmanager/templates
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9093
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9093
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config-volume
+        configMap:
+          name: alertmanager-config
+          items:
+          - key: alertmanager.yml
+            path: alertmanager.yml
+      - name: templates-volume
+        configMap:
+          name: alertmanager-config
+          items:
+          - key: alert-templates.tmpl
+            path: alert-templates.tmpl
+      - name: storage-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: intelliflow-monitoring
+  labels:
+    app: alertmanager
+spec:
+  type: ClusterIP
+  ports:
+  - name: web
+    port: 9093
+    targetPort: 9093
+  - name: mesh
+    port: 9094
+    targetPort: 9094
+  selector:
+    app: alertmanager

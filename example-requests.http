@@ -1,0 +1,158 @@
+# IntelliFlow AI Platform - API Examples
+# You can use these requests with VS Code REST Client extension or copy to curl
+
+### Variables
+@baseUrl = http://localhost
+@userServicePort = 8081
+@transactionServicePort = 8082
+@fraudServicePort = 8083
+@analyticsServicePort = 8084
+@notificationServicePort = 8085
+
+### 1. Register a new user
+POST {{baseUrl}}:{{userServicePort}}/api/v1/auth/register
+Content-Type: application/json
+
+{
+  "username": "testuser",
+  "email": "test@example.com",
+  "password": "TestPassword123!",
+  "firstName": "Test",
+  "lastName": "User",
+  "phoneNumber": "+1234567890"
+}
+
+### 2. Login to get JWT token
+POST {{baseUrl}}:{{userServicePort}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "usernameOrEmail": "testuser",
+  "password": "TestPassword123!"
+}
+
+### 3. Get user profile (requires JWT token from login)
+GET {{baseUrl}}:{{userServicePort}}/api/v1/users/profile
+Authorization: Bearer YOUR_JWT_TOKEN_HERE
+
+### 4. Create a transaction
+POST {{baseUrl}}:{{transactionServicePort}}/api/v1/transactions
+Authorization: Bearer YOUR_JWT_TOKEN_HERE
+Content-Type: application/json
+
+{
+  "userId": 1,
+  "amount": 199.99,
+  "currency": "USD",
+  "transactionType": "PAYMENT",
+  "merchantId": "amazon_store",
+  "description": "Book purchase",
+  "paymentMethod": "CREDIT_CARD",
+  "metadata": {
+    "cardLast4": "1234",
+    "merchantCategory": "BOOKS"
+  }
+}
+
+### 5. Get transaction by ID
+GET {{baseUrl}}:{{transactionServicePort}}/api/v1/transactions/1
+Authorization: Bearer YOUR_JWT_TOKEN_HERE
+
+### 6. Run fraud detection on transaction
+POST {{baseUrl}}:{{fraudServicePort}}/api/v1/fraud/score
+Authorization: Bearer YOUR_JWT_TOKEN_HERE
+Content-Type: application/json
+
+{
+  "transactionId": 1,
+  "userId": 1,
+  "amount": 199.99,
+  "currency": "USD",
+  "merchantId": "amazon_store",
+  "location": {
+    "country": "US",
+    "city": "San Francisco",
+    "ipAddress": "192.168.1.100"
+  },
+  "deviceInfo": {
+    "deviceId": "device_123",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+  },
+  "transactionFeatures": {
+    "isHighRisk": false,
+    "velocityScore": 0.2,
+    "geolocationRisk": 0.1
+  }
+}
+
+### 7. Create a suspicious transaction (high fraud risk)
+POST {{baseUrl}}:{{transactionServicePort}}/api/v1/transactions
+Authorization: Bearer YOUR_JWT_TOKEN_HERE
+Content-Type: application/json
+
+{
+  "userId": 1,
+  "amount": 9999.00,
+  "currency": "USD",
+  "transactionType": "TRANSFER",
+  "merchantId": "suspicious_merchant",
+  "description": "High-value transfer",
+  "paymentMethod": "WIRE_TRANSFER",
+  "metadata": {
+    "country": "XX",
+    "riskLevel": "HIGH"
+  }
+}
+
+### 8. Send notification
+POST {{baseUrl}}:{{notificationServicePort}}/api/v1/notifications/send
+Authorization: Bearer YOUR_JWT_TOKEN_HERE
+Content-Type: application/json
+
+{
+  "userId": 1,
+  "type": "EMAIL",
+  "template": "transaction_confirmation",
+  "recipient": "test@example.com",
+  "data": {
+    "transactionId": 1,
+    "amount": 199.99,
+    "merchantName": "Amazon Store"
+  }
+}
+
+### 9. Get user analytics
+GET {{baseUrl}}:{{analyticsServicePort}}/api/v1/analytics/user/1?startDate=2024-01-01&endDate=2024-12-31
+Authorization: Bearer YOUR_JWT_TOKEN_HERE
+
+### 10. Get transaction analytics
+GET {{baseUrl}}:{{analyticsServicePort}}/api/v1/analytics/transactions/summary?period=DAILY&days=30
+Authorization: Bearer YOUR_JWT_TOKEN_HERE
+
+### Health checks (no authentication required)
+
+### Check User Service health
+GET {{baseUrl}}:{{userServicePort}}/actuator/health
+
+### Check Transaction Service health  
+GET {{baseUrl}}:{{transactionServicePort}}/actuator/health
+
+### Check Fraud Detection Service health
+GET {{baseUrl}}:{{fraudServicePort}}/health
+
+### Check Analytics Service health
+GET {{baseUrl}}:{{analyticsServicePort}}/actuator/health
+
+### Check Notification Service health
+GET {{baseUrl}}:{{notificationServicePort}}/actuator/health
+
+### Prometheus metrics endpoints
+
+### User Service metrics
+GET {{baseUrl}}:{{userServicePort}}/actuator/prometheus
+
+### Transaction Service metrics
+GET {{baseUrl}}:{{transactionServicePort}}/actuator/prometheus
+
+### Fraud Detection metrics
+GET {{baseUrl}}:{{fraudServicePort}}/metrics

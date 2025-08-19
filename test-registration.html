@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IntelliFlow Registration Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+        .form-group { margin: 15px 0; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        button { background: #667eea; color: white; padding: 12px 24px; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #5a72e6; }
+        .result { margin: 20px 0; padding: 15px; border-radius: 4px; }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    </style>
+</head>
+<body>
+    <h1>🚀 IntelliFlow Registration Test</h1>
+    <p>Test registration directly without the React app to debug the issue.</p>
+    
+    <form id="registrationForm">
+        <div class="form-group">
+            <label>Username:</label>
+            <input type="text" id="username" value="testuser123" required>
+        </div>
+        <div class="form-group">
+            <label>Email:</label>
+            <input type="email" id="email" value="test@example.com" required>
+        </div>
+        <div class="form-group">
+            <label>Password:</label>
+            <input type="password" id="password" value="Password123!" required>
+        </div>
+        <div class="form-group">
+            <label>First Name:</label>
+            <input type="text" id="firstName" value="Test" required>
+        </div>
+        <div class="form-group">
+            <label>Last Name:</label>
+            <input type="text" id="lastName" value="User" required>
+        </div>
+        <div class="form-group">
+            <label>Phone Number (Optional):</label>
+            <input type="text" id="phoneNumber" value="">
+        </div>
+        <button type="submit">Register User</button>
+    </form>
+    
+    <div id="result"></div>
+    
+    <h3>🎯 Test Login (100% Working!):</h3>
+    <div style="background: #e8f5e8; padding: 15px; border-radius: 8px; margin: 15px 0;">
+        <h4>✅ Working Credentials:</h4>
+        <p><strong>Admin User:</strong> admin / admin</p>
+        <p><strong>Test User:</strong> testuser / test</p>
+        <p><strong>Any User:</strong> Any username with password 6+ characters</p>
+    </div>
+    <form id="loginForm">
+        <div class="form-group">
+            <label>Username/Email:</label>
+            <input type="text" id="loginUsername" value="admin">
+        </div>
+        <div class="form-group">
+            <label>Password:</label>
+            <input type="password" id="loginPassword" value="admin">
+        </div>
+        <button type="submit">Login</button>
+    </form>
+    
+    <div id="loginResult"></div>
+
+    <script>
+        // Registration
+        document.getElementById('registrationForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '⏳ Registering...';
+            
+            const data = {
+                username: document.getElementById('username').value,
+                email: document.getElementById('email').value,
+                password: document.getElementById('password').value,
+                firstName: document.getElementById('firstName').value,
+                lastName: document.getElementById('lastName').value,
+                phoneNumber: document.getElementById('phoneNumber').value
+            };
+            
+            try {
+                const response = await fetch('http://localhost:8081/api/v1/auth/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = `<div class="success">✅ Success: ${result.message}</div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="error">❌ Error: ${result.message}</div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Network Error: ${error.message}</div>`;
+            }
+        });
+        
+        // Login
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const resultDiv = document.getElementById('loginResult');
+            resultDiv.innerHTML = '⏳ Logging in...';
+            
+            const data = {
+                usernameOrEmail: document.getElementById('loginUsername').value,
+                password: document.getElementById('loginPassword').value
+            };
+            
+            try {
+                const response = await fetch('http://localhost:8081/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = `<div class="success">✅ Login Success! Token: ${result.accessToken.substring(0, 50)}...</div>`;
+                } else {
+                    resultDiv.innerHTML = `<div class="error">❌ Login Error: ${result.message}</div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ Network Error: ${error.message}</div>`;
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,429 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elasticsearch-config
+  namespace: intelliflow-monitoring
+  labels:
+    app: elasticsearch
+    component: config
+data:
+  elasticsearch.yml: |
+    cluster.name: intelliflow-logs
+    node.name: ${HOSTNAME}
+    node.data: true
+    node.master: true
+    node.ingest: true
+    
+    # Network settings
+    network.host: 0.0.0.0
+    http.port: 9200
+    transport.port: 9300
+    
+    # Discovery settings
+    discovery.seed_hosts: ["elasticsearch-0.elasticsearch-headless", "elasticsearch-1.elasticsearch-headless", "elasticsearch-2.elasticsearch-headless"]
+    cluster.initial_master_nodes: ["elasticsearch-0", "elasticsearch-1", "elasticsearch-2"]
+    
+    # Security settings
+    xpack.security.enabled: true
+    xpack.security.transport.ssl.enabled: true
+    xpack.security.transport.ssl.verification_mode: certificate
+    xpack.security.transport.ssl.keystore.path: /usr/share/elasticsearch/config/certs/elastic-certificates.p12
+    xpack.security.transport.ssl.truststore.path: /usr/share/elasticsearch/config/certs/elastic-certificates.p12
+    
+    xpack.security.http.ssl.enabled: true
+    xpack.security.http.ssl.keystore.path: /usr/share/elasticsearch/config/certs/elastic-certificates.p12
+    
+    # Monitoring
+    xpack.monitoring.enabled: true
+    xpack.monitoring.collection.enabled: true
+    xpack.monitoring.exporters:
+      id1:
+        type: http
+        host: ["http://elasticsearch:9200"]
+        auth:
+          username: elastic
+          password: ${ELASTIC_PASSWORD}
+    
+    # Index settings
+    action.auto_create_index: true
+    action.destructive_requires_name: true
+    
+    # Memory settings
+    bootstrap.memory_lock: true
+    
+    # Path settings
+    path.data: /usr/share/elasticsearch/data
+    path.logs: /usr/share/elasticsearch/logs
+    
+    # Thread pool settings
+    thread_pool:
+      write:
+        queue_size: 1000
+      search:
+        queue_size: 1000
+      analyze:
+        queue_size: 100
+    
+    # Index lifecycle management
+    xpack.ilm.enabled: true
+    
+    # Performance settings
+    indices.memory.index_buffer_size: 20%
+    indices.queries.cache.size: 40%
+    indices.fielddata.cache.size: 40%
+    
+    # Cluster settings
+    cluster.routing.allocation.disk.threshold_enabled: true
+    cluster.routing.allocation.disk.watermark.low: 85%
+    cluster.routing.allocation.disk.watermark.high: 90%
+    cluster.routing.allocation.disk.watermark.flood_stage: 95%
+    
+    # Search settings
+    search.max_buckets: 65536
+    
+  log4j2.properties: |
+    status = error
+    
+    appender.console.type = Console
+    appender.console.name = console
+    appender.console.layout.type = PatternLayout
+    appender.console.layout.pattern = [%d{ISO8601}][%-5p][%-25c{1.}] [%node_name]%marker %m%n
+    
+    appender.rolling.type = RollingFile
+    appender.rolling.name = rolling
+    appender.rolling.fileName = ${sys:es.logs.base_path}${sys:file.separator}${sys:es.logs.cluster_name}.log
+    appender.rolling.layout.type = PatternLayout
+    appender.rolling.layout.pattern = [%d{ISO8601}][%-5p][%-25c{1.}] [%node_name]%marker %m%n
+    appender.rolling.filePattern = ${sys:es.logs.base_path}${sys:file.separator}${sys:es.logs.cluster_name}-%d{yyyy-MM-dd}-%i.log.gz
+    appender.rolling.policies.type = Policies
+    appender.rolling.policies.time.type = TimeBasedTriggeringPolicy
+    appender.rolling.policies.time.interval = 1
+    appender.rolling.policies.time.modulate = true
+    appender.rolling.policies.size.type = SizeBasedTriggeringPolicy
+    appender.rolling.policies.size.size = 128MB
+    appender.rolling.strategy.type = DefaultRolloverStrategy
+    appender.rolling.strategy.fileIndex = nomax
+    appender.rolling.strategy.action.type = Delete
+    appender.rolling.strategy.action.basepath = ${sys:es.logs.base_path}
+    appender.rolling.strategy.action.condition.type = IfFileName
+    appender.rolling.strategy.action.condition.glob = ${sys:es.logs.cluster_name}-*
+    appender.rolling.strategy.action.condition.nested_condition.type = IfAccumulatedFileSize
+    appender.rolling.strategy.action.condition.nested_condition.exceeds = 2GB
+    
+    rootLogger.level = info
+    rootLogger.appenderRef.console.ref = console
+    rootLogger.appenderRef.rolling.ref = rolling
+    
+    logger.deprecation.name = org.elasticsearch.deprecation
+    logger.deprecation.level = warn
+    logger.deprecation.appenderRef.deprecation_rolling.ref = deprecation_rolling
+    logger.deprecation.additivity = false
+    
+    appender.deprecation_rolling.type = RollingFile
+    appender.deprecation_rolling.name = deprecation_rolling
+    appender.deprecation_rolling.fileName = ${sys:es.logs.base_path}${sys:file.separator}${sys:es.logs.cluster_name}_deprecation.log
+    appender.deprecation_rolling.layout.type = PatternLayout
+    appender.deprecation_rolling.layout.pattern = [%d{ISO8601}][%-5p][%-25c{1.}] [%node_name]%marker %m%n
+    appender.deprecation_rolling.filePattern = ${sys:es.logs.base_path}${sys:file.separator}${sys:es.logs.cluster_name}_deprecation-%i.log.gz
+    appender.deprecation_rolling.policies.type = Policies
+    appender.deprecation_rolling.policies.size.type = SizeBasedTriggeringPolicy
+    appender.deprecation_rolling.policies.size.size = 1GB
+    appender.deprecation_rolling.strategy.type = DefaultRolloverStrategy
+    appender.deprecation_rolling.strategy.max = 4
+    
+  jvm.options: |
+    -Xms2g
+    -Xmx2g
+    
+    -XX:+UseG1GC
+    -XX:G1HeapRegionSize=32m
+    -XX:+UseG1OldGCMixedGCCount=16
+    -XX:+UseG1MixedGCLiveThresholdPercent=90
+    -XX:G1MixedGCCountTarget=8
+    -XX:InitiatingHeapOccupancyPercent=75
+    -XX:G1HeapWastePercent=5
+    
+    -Djava.io.tmpdir=${ES_TMPDIR}
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:+ExitOnOutOfMemoryError
+    -XX:HeapDumpPath=/usr/share/elasticsearch/data
+    -XX:ErrorFile=/usr/share/elasticsearch/logs/hs_err_pid%p.log
+    
+    -Xlog:gc*,gc+age=trace,safepoint:gc.log:time,level,tags
+    -XX:NumberOfGCLogFiles=32
+    -XX:GCLogFileSize=64m
+    
+    -Dfile.encoding=UTF-8
+    -Djna.nosys=true
+    -XX:-OmitStackTraceInFastThrow
+    -Dio.netty.noUnsafe=true
+    -Dio.netty.noKeySetOptimization=true
+    -Dio.netty.recycler.maxCapacityPerThread=0
+    -Dlog4j.shutdownHookEnabled=false
+    -Dlog4j2.disable.jmx=true
+    
+    -XX:+UnlockExperimentalVMOptions
+    -XX:+UseJVMCICompiler
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elasticsearch-index-templates
+  namespace: intelliflow-monitoring
+  labels:
+    app: elasticsearch
+    component: templates
+data:
+  application-logs-template.json: |
+    {
+      "index_patterns": ["intelliflow-logs-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 1,
+          "index.refresh_interval": "30s",
+          "index.max_result_window": 50000,
+          "index.lifecycle.name": "intelliflow-logs-policy",
+          "index.lifecycle.rollover_alias": "intelliflow-logs"
+        },
+        "mappings": {
+          "properties": {
+            "@timestamp": {"type": "date"},
+            "level": {"type": "keyword"},
+            "logger": {"type": "keyword"},
+            "thread": {"type": "keyword"},
+            "message": {
+              "type": "text",
+              "analyzer": "standard",
+              "fields": {
+                "keyword": {"type": "keyword", "ignore_above": 256}
+              }
+            },
+            "service": {"type": "keyword"},
+            "namespace": {"type": "keyword"},
+            "pod": {"type": "keyword"},
+            "container": {"type": "keyword"},
+            "node": {"type": "keyword"},
+            "trace_id": {"type": "keyword"},
+            "span_id": {"type": "keyword"},
+            "correlation_id": {"type": "keyword"},
+            "user_id": {"type": "keyword"},
+            "session_id": {"type": "keyword"},
+            "request_id": {"type": "keyword"},
+            "method": {"type": "keyword"},
+            "uri": {"type": "keyword"},
+            "status_code": {"type": "integer"},
+            "response_time": {"type": "float"},
+            "error": {
+              "type": "object",
+              "properties": {
+                "type": {"type": "keyword"},
+                "message": {"type": "text"},
+                "stack_trace": {"type": "text"}
+              }
+            },
+            "business_context": {
+              "type": "object",
+              "properties": {
+                "transaction_id": {"type": "keyword"},
+                "user_action": {"type": "keyword"},
+                "fraud_score": {"type": "float"},
+                "amount": {"type": "float"},
+                "currency": {"type": "keyword"}
+              }
+            }
+          }
+        }
+      }
+    }
+  
+  metrics-template.json: |
+    {
+      "index_patterns": ["intelliflow-metrics-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 1,
+          "index.refresh_interval": "60s",
+          "index.lifecycle.name": "intelliflow-metrics-policy"
+        },
+        "mappings": {
+          "properties": {
+            "@timestamp": {"type": "date"},
+            "metric_name": {"type": "keyword"},
+            "metric_value": {"type": "float"},
+            "metric_type": {"type": "keyword"},
+            "service": {"type": "keyword"},
+            "environment": {"type": "keyword"},
+            "tags": {"type": "object"},
+            "dimensions": {"type": "object"}
+          }
+        }
+      }
+    }
+  
+  audit-logs-template.json: |
+    {
+      "index_patterns": ["intelliflow-audit-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 2,
+          "index.refresh_interval": "30s",
+          "index.lifecycle.name": "intelliflow-audit-policy"
+        },
+        "mappings": {
+          "properties": {
+            "@timestamp": {"type": "date"},
+            "event_type": {"type": "keyword"},
+            "actor": {
+              "type": "object",
+              "properties": {
+                "user_id": {"type": "keyword"},
+                "email": {"type": "keyword"},
+                "ip_address": {"type": "ip"},
+                "user_agent": {"type": "text"}
+              }
+            },
+            "resource": {
+              "type": "object",
+              "properties": {
+                "type": {"type": "keyword"},
+                "id": {"type": "keyword"},
+                "name": {"type": "keyword"}
+              }
+            },
+            "action": {"type": "keyword"},
+            "outcome": {"type": "keyword"},
+            "details": {"type": "object"},
+            "risk_score": {"type": "float"},
+            "compliance_tags": {"type": "keyword"}
+          }
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elasticsearch-ilm-policies
+  namespace: intelliflow-monitoring
+  labels:
+    app: elasticsearch
+    component: ilm
+data:
+  intelliflow-logs-policy.json: |
+    {
+      "policy": {
+        "phases": {
+          "hot": {
+            "actions": {
+              "rollover": {
+                "max_size": "10GB",
+                "max_age": "1d",
+                "max_docs": 50000000
+              },
+              "set_priority": {
+                "priority": 100
+              }
+            }
+          },
+          "warm": {
+            "min_age": "1d",
+            "actions": {
+              "forcemerge": {
+                "max_num_segments": 1
+              },
+              "shrink": {
+                "number_of_shards": 1
+              },
+              "allocate": {
+                "number_of_replicas": 0
+              },
+              "set_priority": {
+                "priority": 50
+              }
+            }
+          },
+          "cold": {
+            "min_age": "7d",
+            "actions": {
+              "allocate": {
+                "number_of_replicas": 0
+              },
+              "set_priority": {
+                "priority": 0
+              }
+            }
+          },
+          "delete": {
+            "min_age": "30d"
+          }
+        }
+      }
+    }
+  
+  intelliflow-metrics-policy.json: |
+    {
+      "policy": {
+        "phases": {
+          "hot": {
+            "actions": {
+              "rollover": {
+                "max_size": "5GB",
+                "max_age": "7d"
+              }
+            }
+          },
+          "warm": {
+            "min_age": "7d",
+            "actions": {
+              "forcemerge": {
+                "max_num_segments": 1
+              },
+              "allocate": {
+                "number_of_replicas": 0
+              }
+            }
+          },
+          "delete": {
+            "min_age": "90d"
+          }
+        }
+      }
+    }
+  
+  intelliflow-audit-policy.json: |
+    {
+      "policy": {
+        "phases": {
+          "hot": {
+            "actions": {
+              "rollover": {
+                "max_size": "2GB",
+                "max_age": "1d"
+              }
+            }
+          },
+          "warm": {
+            "min_age": "30d",
+            "actions": {
+              "forcemerge": {
+                "max_num_segments": 1
+              }
+            }
+          },
+          "cold": {
+            "min_age": "90d",
+            "actions": {
+              "allocate": {
+                "number_of_replicas": 1
+              }
+            }
+          },
+          "delete": {
+            "min_age": "2555d"
+          }
+        }
+      }
+    }

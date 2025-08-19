@@ -1,0 +1,134 @@
+# IntelliFlow AI Orchestrator - Python Dependencies
+
+# Core Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# MLOps & Experiment Tracking
+mlflow==2.8.1
+wandb==0.16.1
+neptune==1.8.4
+clearml==1.13.2
+
+# Machine Learning
+scikit-learn==1.3.2
+xgboost==2.0.2
+lightgbm==4.1.0
+tensorflow==2.15.0
+torch==2.1.1
+transformers==4.36.0
+numpy==1.24.4
+pandas==2.1.4
+scipy==1.11.4
+
+# Hyperparameter Optimization
+optuna==3.4.0
+hyperopt==0.2.7
+ray[tune]==2.8.0
+bayesian-optimization==1.4.3
+
+# Model Serving & Deployment
+bentoml==1.1.9
+torchserve==0.9.0
+tritonclient[all]==2.40.0
+
+# Container & Kubernetes
+kubernetes==28.1.0
+docker==6.1.3
+kubernetes-asyncio==24.2.3
+
+# Data Processing
+redis==5.0.1
+asyncpg==0.29.0
+pymongo==4.6.0
+kafka-python==2.0.2
+aiokafka==0.9.0
+sqlalchemy[asyncio]==2.0.23
+
+# Monitoring & Observability
+prometheus-client==0.19.0
+grafana-api==1.0.3
+influxdb-client==1.38.0
+structlog==23.2.0
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+
+# Scheduling & Workflow
+celery[redis]==5.3.4
+prefect==2.14.17
+airflow==2.7.3
+schedule==1.2.0
+apscheduler==3.10.4
+
+# Notifications & Alerting
+slack-sdk==3.25.0
+email-validator==2.1.0
+jinja2==3.1.2
+
+# Security & Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+cryptography==41.0.8
+
+# HTTP & API
+httpx==0.25.2
+aiohttp==3.9.1
+requests==2.31.0
+websockets==12.0
+
+# Utilities
+python-dotenv==1.0.0
+click==8.1.7
+typer==0.9.0
+rich==13.7.0
+pyyaml==6.0.1
+toml==0.10.2
+configparser==6.0.0
+
+# Git & Version Control
+gitpython==3.1.40
+pygit2==1.13.3
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+httpx-test==0.25.2
+factory-boy==3.3.0
+faker==20.1.0
+
+# Code Quality
+black==23.11.0
+flake8==6.1.0
+mypy==1.7.1
+isort==5.12.0
+pre-commit==3.6.0
+
+# Development
+ipython==8.17.2
+jupyter==1.0.0
+notebook==7.0.6
+
+# Cloud & Storage
+boto3==1.34.0
+google-cloud-storage==2.10.0
+azure-storage-blob==12.19.0
+minio==7.2.0
+
+# Model Registry & Artifacts
+dvc==3.30.0
+huggingface-hub==0.19.4
+
+# Time Series & Analytics
+statsmodels==0.14.0
+plotly==5.17.0
+seaborn==0.13.0
+matplotlib==3.8.2
+
+# Async Support
+asyncio-mqtt==0.16.1
+aiofiles==23.2.1
+aioredis==2.0.1
