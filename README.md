@@ -2,6 +2,10 @@
 
 A comprehensive microservices-based financial platform with advanced fraud detection, analytics, and notification capabilities.
 
+## Repository
+
+- GitHub: https://github.com/GKR5413/intelliflow-ai-platform
+
 ## Architecture Overview
 
 The platform consists of 5 core microservices:
@@ -43,7 +47,7 @@ The platform consists of 5 core microservices:
 The IntelliFlow AI Platform now includes a **comprehensive React-based web interface**!
 
 ### **🌐 Access the Web UI:**
-- **URL**: http://localhost:3000
+- **URL**: http://localhost:3001
 - **Demo Login**: admin / admin
 - **Features**: Complete transaction management, real-time fraud detection, interactive analytics, and more!
 
@@ -82,7 +86,7 @@ See [SERVER_DEPLOYMENT_GUIDE.md](./deployment/SERVER_DEPLOYMENT_GUIDE.md) for co
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/GKR5413/intelliflow-ai-platform.git
    cd intelliflow-ai-platform
    ```
 
@@ -109,11 +113,11 @@ See [SERVER_DEPLOYMENT_GUIDE.md](./deployment/SERVER_DEPLOYMENT_GUIDE.md) for co
 5. **Verify services are running**
    ```bash
    # Check service health
-   curl http://localhost:8081/api/v1/actuator/health  # User Service
-   curl http://localhost:8082/api/v1/actuator/health  # Transaction Service
-   curl http://localhost:8083/api/v1/actuator/health  # Fraud Detection Service
-   curl http://localhost:8084/api/v1/actuator/health  # Analytics Service
-   curl http://localhost:8085/api/v1/actuator/health  # Notification Service
+   curl http://localhost:8081/actuator/health                 # User Service
+   curl http://localhost:8082/actuator/health                 # Transaction Service
+   curl http://localhost:8083/api/v1/actuator/health          # Fraud Detection Service
+   curl http://localhost:8084/actuator/health                 # Analytics Service
+   curl http://localhost:8085/actuator/health                 # Notification Service
    ```
 
 ### Development Tools Access
@@ -341,10 +345,4 @@ EUREKA_URL=http://localhost:8761/eureka
 4. Submit a pull request
 5. Ensure all CI checks pass
 
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-For technical support, please contact the development team or create an issue in the repository.
+---
