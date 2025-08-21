@@ -208,12 +208,11 @@ cache:
     prefix: "dev:user-service:"
 
 # Development Tools
-spring:
-  devtools:
-    restart:
-      enabled: true
-    livereload:
-      enabled: true
-  h2:
-    console:
-      enabled: false  # Using PostgreSQL in development
+devtools:
+  restart:
+    enabled: true
+  livereload:
+    enabled: true
+h2:
+  console:
+    enabled: false  # Using PostgreSQL in development

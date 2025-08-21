@@ -122,39 +122,3 @@ resilience4j:
       default:
         maxAttempts: 3
         waitDuration: 1s
-
----
-spring:
-  config:
-    activate:
-      on-profile: dev
-  datasource:
-    url: jdbc:postgresql://localhost:5432/user_db
-  jpa:
-    show-sql: true
-
-logging:
-  level:
-    root: INFO
-    com.intelliflow: DEBUG
-
----
-spring:
-  config:
-    activate:
-      on-profile: prod
-  datasource:
-    url: jdbc:postgresql://${RDS_ENDPOINT}:5432/${RDS_DB_NAME}
-    username: ${RDS_USERNAME}
-    password: ${RDS_PASSWORD}
-  data:
-    redis:
-      host: ${ELASTICACHE_ENDPOINT}
-      port: 6379
-  kafka:
-    bootstrap-servers: ${MSK_BOOTSTRAP_SERVERS}
-
-logging:
-  level:
-    root: WARN
-    com.intelliflow: INFO
