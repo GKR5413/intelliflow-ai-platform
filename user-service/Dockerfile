@@ -9,10 +9,10 @@ COPY src ./src
 RUN mvn clean package -DskipTests
 
 # Production stage
-FROM amazoncorretto:17-alpine
+FROM eclipse-temurin:17-jre
 
 # Add non-root user for security
-RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser || (addgroup -S appgroup && adduser -S appuser -G appgroup)
 
 # Set working directory
 WORKDIR /app
