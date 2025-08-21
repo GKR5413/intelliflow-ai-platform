@@ -61,6 +61,11 @@ CACHE_HIT_COUNTER = Counter('cache_hits_total', 'Cache hits', ['cache_type'])
 CACHE_MISS_COUNTER = Counter('cache_misses_total', 'Cache misses', ['cache_type'])
 ACTIVE_REQUESTS = Gauge('active_requests', 'Number of active requests')
 
+# LLM metrics
+LLM_INVOCATIONS = Counter('llm_verifications_total', 'Total LLM secondary verifications', ['model'])
+LLM_ERRORS = Counter('llm_verification_errors_total', 'LLM verification errors', ['reason'])
+LLM_LATENCY = Histogram('llm_verification_duration_seconds', 'LLM verification latency', ['model'])
+
 # Security
 security = HTTPBearer()
 
@@ -68,6 +73,7 @@ security = HTTPBearer()
 model_manager = None
 feature_store = None
 redis_client = None
+llm_client = None
 
 
 # Pydantic models for API
@@ -128,6 +134,10 @@ class FraudScore(BaseModel):
     features_used: int = Field(..., description="Number of features used")
     processing_time_ms: float = Field(..., description="Processing time in milliseconds")
     confidence_score: float = Field(..., ge=0, le=1, description="Prediction confidence")
+    # Optional LLM-assisted verification
+    llm_used: Optional[bool] = Field(default=False, description="Whether LLM secondary verification was used")
+    llm_score: Optional[float] = Field(default=None, ge=0, le=1, description="LLM-derived risk score (0-1)")
+    llm_reason: Optional[str] = Field(default=None, description="LLM explanation for risk assessment")
     
     
 class BatchFraudScore(BaseModel):
@@ -390,7 +400,7 @@ class CacheManager:
 # Initialize global components
 async def initialize_components():
     """Initialize all service components"""
-    global model_manager, feature_store, redis_client
+    global model_manager, feature_store, redis_client, llm_client
     
     try:
         # Initialize Redis
@@ -403,6 +413,16 @@ async def initialize_components():
         
         # Initialize feature store
         feature_store = FraudFeatureStore()
+        
+        # Initialize LLM client (optional)
+        if os.getenv('LLM_ENABLED', 'false').lower() in ('1', 'true', 'yes'):
+            llm_client = LLMClient(
+                base_url=os.getenv('OLLAMA_URL', 'http://localhost:11434'),
+                model=os.getenv('OLLAMA_MODEL', 'mistral')
+            )
+            logger.info("LLM client initialized", model=os.getenv('OLLAMA_MODEL', 'mistral'))
+        else:
+            logger.info("LLM client disabled (set LLM_ENABLED=true to enable)")
         
         logger.info("All components initialized successfully")
         
@@ -432,6 +452,114 @@ async def get_cache_manager() -> CacheManager:
     if not redis_client:
         raise HTTPException(status_code=503, detail="Cache not available")
     return CacheManager(redis_client)
+
+
+# ------------------------
+# LLM Verification Support
+# ------------------------
+
+class LLMClient:
+    """Minimal client for Ollama-hosted LLMs (e.g., Mistral)."""
+
+    def __init__(self, base_url: str, model: str):
+        self.base_url = base_url.rstrip('/')
+        self.model = model
+        self.timeout_seconds = float(os.getenv('LLM_TIMEOUT_SECONDS', '0.6'))
+
+    async def verify_transaction(self, transaction: 'TransactionInput', features: Dict[str, Any]) -> Dict[str, Any]:
+        import httpx
+        start_time = time.time()
+        prompt = self._build_prompt(transaction, features)
+        try:
+            url = f"{self.base_url}/api/generate"
+            payload = {
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.1, "num_predict": 200}
+            }
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                text = data.get('response', '')
+                parsed = self._parse_llm_response(text)
+                LLM_LATENCY.labels(self.model).observe(time.time() - start_time)
+                LLM_INVOCATIONS.labels(self.model).inc()
+                return parsed
+        except Exception as e:
+            LLM_ERRORS.labels(reason=type(e).__name__).inc()
+            logger.warning("LLM verification failed", error=str(e))
+            return {"llm_score": None, "llm_reason": None}
+
+    def _build_prompt(self, transaction: 'TransactionInput', features: Dict[str, Any]) -> str:
+        summary = {
+            "transaction_id": transaction.transaction_id,
+            "amount": transaction.amount,
+            "currency": transaction.currency,
+            "payment_method": transaction.payment_method,
+            "merchant_category": transaction.merchant_category,
+            "user_country": transaction.user_country,
+            "merchant_country": transaction.merchant_country,
+            "channel": transaction.channel,
+            "timestamp": transaction.timestamp.isoformat(),
+        }
+        feature_keys = [
+            'risk_score', 'txn_count_24h', 'txn_amount_sum_24h', 'unique_merchants_24h',
+            'declined_txn_ratio_7d', 'device_reputation_score', 'merchant_risk_category',
+            'fraud_rate_30d', 'transaction_amount', 'is_international', 'hour_of_day', 'day_of_week'
+        ]
+        compact_features = {k: features.get(k) for k in feature_keys if k in features}
+        instruction = (
+            "You are a fraud detection assistant. Given the transaction summary and compact feature set, "
+            "assess fraud risk. Respond in STRICT JSON with keys: risk_score (0-1 float), reason (short)."
+        )
+        prompt = (
+            f"{instruction}\n\n"
+            f"Transaction: {json.dumps(summary)}\n"
+            f"Features: {json.dumps(compact_features)}\n"
+            f"JSON: "
+        )
+        return prompt
+
+    def _parse_llm_response(self, text: str) -> Dict[str, Any]:
+        try:
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                obj = json.loads(text[start:end + 1])
+                score = obj.get('risk_score')
+                reason = obj.get('reason')
+                if isinstance(score, (int, float)):
+                    score = max(0.0, min(1.0, float(score)))
+                else:
+                    score = None
+                if reason is not None:
+                    reason = str(reason)[:300]
+                return {"llm_score": score, "llm_reason": reason}
+        except Exception:
+            pass
+        return {"llm_score": None, "llm_reason": None}
+
+
+def _should_use_llm(primary_prob: float, transaction_amount: float) -> bool:
+    if os.getenv('LLM_ENABLED', 'false').lower() not in ('1', 'true', 'yes'):
+        return False
+    try:
+        band_low = float(os.getenv('LLM_TRIGGER_MIN_PROB', '0.4'))
+        band_high = float(os.getenv('LLM_TRIGGER_MAX_PROB', '0.6'))
+        min_amount = float(os.getenv('LLM_TRIGGER_MIN_AMOUNT', '500.0'))
+    except Exception:
+        band_low, band_high, min_amount = 0.4, 0.6, 500.0
+    return (band_low <= primary_prob <= band_high) or (transaction_amount >= min_amount)
+
+
+def _combine_scores(primary_prob: float, llm_score: Optional[float]) -> float:
+    if llm_score is None:
+        return primary_prob
+    weight = float(os.getenv('LLM_WEIGHT', '0.3'))
+    weight = max(0.0, min(0.5, weight))
+    return float((1.0 - weight) * primary_prob + weight * llm_score)
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
@@ -546,16 +674,42 @@ async def predict_fraud(
         # Make prediction
         prediction_result = await model_mgr.predict(features_df)
         
+        # Optional LLM secondary verification
+        llm_used = False
+        llm_score = None
+        llm_reason = None
+        primary_prob = prediction_result['probabilities'][0]
+        final_prob = primary_prob
+        if _should_use_llm(primary_prob, transaction.amount) and llm_client is not None:
+            llm_used = True
+            try:
+                llm_result = await llm_client.verify_transaction(transaction, features_df.iloc[0].to_dict())
+                llm_score = llm_result.get('llm_score')
+                llm_reason = llm_result.get('llm_reason')
+                final_prob = _combine_scores(primary_prob, llm_score)
+            except Exception as e:
+                logger.warning("LLM combination failed", error=str(e))
+                llm_used = False
+                llm_score = None
+                llm_reason = None
+
+        # Derive final prediction from combined probability
+        final_pred = final_prob > 0.5
+        final_risk = 'low' if final_prob < 0.3 else ('medium' if final_prob < 0.7 else 'high')
+
         # Create response
         fraud_score = FraudScore(
             transaction_id=transaction.transaction_id,
-            fraud_probability=prediction_result['probabilities'][0],
-            fraud_prediction=prediction_result['predictions'][0],
-            risk_level=prediction_result['risk_levels'][0],
+            fraud_probability=final_prob,
+            fraud_prediction=bool(final_pred),
+            risk_level=final_risk,
             model_version=model_mgr.model_version,
             features_used=prediction_result['features_count'],
             processing_time_ms=prediction_result['processing_time_ms'],
-            confidence_score=prediction_result['confidence_scores'][0]
+            confidence_score=prediction_result['confidence_scores'][0],
+            llm_used=llm_used,
+            llm_score=llm_score,
+            llm_reason=llm_reason
         )
         
         # Cache result
