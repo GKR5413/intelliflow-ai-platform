@@ -222,7 +222,7 @@ services:
   # Fraud Detection Service
   fraud-detection-service:
     build:
-      context: ./fraud-detection-service
+      context: ./fraud-detection-service/src/main/python
       dockerfile: Dockerfile
     container_name: fraud-detection-service
     depends_on:
@@ -236,24 +236,19 @@ services:
       # eureka-server:
       #   condition: service_healthy
     ports:
-      - "8083:8083"
+      - "8083:8000"
     environment:
-      SPRING_PROFILES_ACTIVE: dev
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: fraud_db
-      DB_USERNAME: postgres
-      DB_PASSWORD: postgres
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis123}
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      EUREKA_URL: http://eureka-server:8761/eureka
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+      LLM_ENABLED: "true"
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: mistral
+      LLM_REQUIRED: "true"
+      LLM_FAIL_CLOSED: "true"
+      LLM_PASS_THRESHOLD: "0.5"
     networks:
       - intelliflow-network
     volumes:
       - fraud_logs:/app/logs
-      - ./models:/app/models
     restart: unless-stopped
 
   # Analytics Service
@@ -385,6 +380,18 @@ services:
     networks:
       - intelliflow-network
 
+  # Ollama for local LLM serving (Mistral)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - intelliflow-network
+    restart: unless-stopped
+
   # Jaeger for distributed tracing
   jaeger:
     image: jaegertracing/all-in-one:1.49
@@ -419,3 +426,4 @@ volumes:
   notification_logs:
   prometheus_data:
   grafana_data:
+  ollama_data:
