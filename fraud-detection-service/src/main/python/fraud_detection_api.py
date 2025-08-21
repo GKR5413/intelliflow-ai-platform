@@ -65,6 +65,7 @@ ACTIVE_REQUESTS = Gauge('active_requests', 'Number of active requests')
 LLM_INVOCATIONS = Counter('llm_verifications_total', 'Total LLM secondary verifications', ['model'])
 LLM_ERRORS = Counter('llm_verification_errors_total', 'LLM verification errors', ['reason'])
 LLM_LATENCY = Histogram('llm_verification_duration_seconds', 'LLM verification latency', ['model'])
+AGREEMENT_COUNTER = Counter('llm_ml_agreement_total', 'Agreement between ML and LLM', ['outcome'])
 
 # Security
 security = HTTPBearer()
@@ -138,6 +139,7 @@ class FraudScore(BaseModel):
     llm_used: Optional[bool] = Field(default=False, description="Whether LLM secondary verification was used")
     llm_score: Optional[float] = Field(default=None, ge=0, le=1, description="LLM-derived risk score (0-1)")
     llm_reason: Optional[str] = Field(default=None, description="LLM explanation for risk assessment")
+    llm_fraud_prediction: Optional[bool] = Field(default=None, description="LLM binary fraud prediction (True=fraud)")
     
     
 class BatchFraudScore(BaseModel):
@@ -562,6 +564,16 @@ def _combine_scores(primary_prob: float, llm_score: Optional[float]) -> float:
     return float((1.0 - weight) * primary_prob + weight * llm_score)
 
 
+def _llm_binary_from_score(llm_score: Optional[float]) -> Optional[bool]:
+    if llm_score is None:
+        return None
+    try:
+        threshold = float(os.getenv('LLM_PASS_THRESHOLD', '0.5'))
+    except Exception:
+        threshold = 0.5
+    return bool(llm_score > threshold)
+
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """Verify JWT token (simplified for demo)"""
     # In production, implement proper JWT validation
@@ -674,27 +686,51 @@ async def predict_fraud(
         # Make prediction
         prediction_result = await model_mgr.predict(features_df)
         
-        # Optional LLM secondary verification
+        # LLM verification (required if enabled): final decision is AND of ML and LLM non-fraud
         llm_used = False
         llm_score = None
         llm_reason = None
+        llm_pred: Optional[bool] = None
         primary_prob = prediction_result['probabilities'][0]
+        ml_pred = bool(primary_prob > 0.5)
         final_prob = primary_prob
+        require_llm = os.getenv('LLM_REQUIRED', 'true').lower() in ('1', 'true', 'yes')
+        fail_closed = os.getenv('LLM_FAIL_CLOSED', 'true').lower() in ('1', 'true', 'yes')
         if _should_use_llm(primary_prob, transaction.amount) and llm_client is not None:
             llm_used = True
             try:
                 llm_result = await llm_client.verify_transaction(transaction, features_df.iloc[0].to_dict())
                 llm_score = llm_result.get('llm_score')
                 llm_reason = llm_result.get('llm_reason')
-                final_prob = _combine_scores(primary_prob, llm_score)
+                llm_pred = _llm_binary_from_score(llm_score)
+                # keep final_prob as ML prob to reflect primary model, or optionally combine for score only
+                final_prob = _combine_scores(primary_prob, llm_score) if llm_score is not None else primary_prob
             except Exception as e:
-                logger.warning("LLM combination failed", error=str(e))
-                llm_used = False
+                logger.warning("LLM verification failed", error=str(e))
+                llm_used = True
                 llm_score = None
                 llm_reason = None
+                llm_pred = None
+        else:
+            # LLM not used (disabled or condition not met)
+            llm_used = False
+            llm_pred = None
 
-        # Derive final prediction from combined probability
-        final_pred = final_prob > 0.5
+        # Final decision: require both ML and LLM to agree on non-fraud when LLM is required/used
+        # Interpretation: fraud_prediction=True means flagged as fraud
+        if llm_used and llm_pred is not None:
+            # AND policy: approve (non-fraud) only if both are non-fraud
+            # So fraud = ML OR LLM
+            final_pred = bool(ml_pred or llm_pred)
+            AGREEMENT_COUNTER.labels(outcome='agree' if ml_pred == llm_pred else 'disagree').inc()
+        elif require_llm:
+            # LLM required but not available; fail-closed -> treat as fraud
+            final_pred = True if fail_closed else ml_pred
+            AGREEMENT_COUNTER.labels(outcome='llm_missing').inc()
+        else:
+            # LLM not required; use ML decision
+            final_pred = ml_pred
+
         final_risk = 'low' if final_prob < 0.3 else ('medium' if final_prob < 0.7 else 'high')
 
         # Create response
@@ -709,7 +745,8 @@ async def predict_fraud(
             confidence_score=prediction_result['confidence_scores'][0],
             llm_used=llm_used,
             llm_score=llm_score,
-            llm_reason=llm_reason
+            llm_reason=llm_reason,
+            llm_fraud_prediction=llm_pred
         )
         
         # Cache result
